@@ -67,6 +67,11 @@ queries:
 - `/sql 버전 vh 202602 판매량`
 - `/sql version=VH yearmonth=202602 판매량`
 
+동작 완화 정책:
+- `version` 값은 대소문자를 구분하지 않습니다. (`vh`, `VH` 모두 허용)
+- 월을 `N월`로만 입력하면 연도는 최근 기준으로 자동 보정합니다.
+- 당일 `workdate` 고정이 아니라 조건에 맞는 최신 적재일 기준으로 조회합니다.
+
 ## Oracle 연결 정책
 - 드라이버: `python-oracledb` (Thin 금지)
 - Thick mode 1회 초기화: `oracledb.init_oracle_client(lib_dir=r"c:\instantclient")`

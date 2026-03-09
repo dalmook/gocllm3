@@ -198,10 +198,21 @@ def _extract_yyyymm(question: str) -> Optional[str]:
 
     m2 = re.search(r"(?:(20\d{2})\s*년\s*)?(\d{1,2})\s*월", q)
     if m2:
-        yy = int(m2.group(1)) if m2.group(1) else datetime.utcnow().year
         mm = int(m2.group(2))
-        if 1 <= mm <= 12:
+        if not (1 <= mm <= 12):
+            return None
+
+        if m2.group(1):
+            yy = int(m2.group(1))
             return f"{yy:04d}{mm:02d}"
+
+        now = datetime.utcnow()
+        yy = now.year
+        # 연도 미입력 시: 현재 월보다 큰 월은 전년도 데이터로 간주(사용자 자연어 완화)
+        if mm > now.month:
+            yy -= 1
+
+        return f"{yy:04d}{mm:02d}"
     return None
 
 
