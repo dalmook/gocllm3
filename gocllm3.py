@@ -418,7 +418,10 @@ class KnoxMessenger:
                 {"msgId": requestid, "msgType": 0, "chatMsg": text, "msgTtl": 3600}
             ],
         }
-        return self._post_encrypted(api, body)
+        resp = self._post_encrypted(api, body)
+        if isinstance(resp, dict):
+            resp["_request_msg_id"] = requestid
+        return resp
 
     def send_adaptive_card(self, chatroom_id: int, card: dict):
         api = "/messenger/message/api/v1.0/message/chatRequest"
@@ -1571,13 +1574,56 @@ def _register_llm_notice(req_id: str, resp: Any):
     if not req_id:
         return
     try:
-        mid, st = extract_msgid_senttime(resp if isinstance(resp, dict) else {})
+        payload = resp if isinstance(resp, dict) else {}
+        expected_msg_id = payload.get("_request_msg_id")
+        mid, st = extract_msgid_senttime_for_expected(payload, expected_msg_id)
         if mid is None or st is None:
             return
         with llm_notice_lock:
             llm_notice_state.setdefault(req_id, []).append((int(mid), int(st)))
     except Exception as e:
         print(f"[LLM][{req_id}] notice register failed: {e}")
+
+
+def extract_msgid_senttime_for_expected(resp: dict, expected_msg_id: Any):
+    if expected_msg_id is None:
+        return None, None
+
+    def _match_entry(entry: Any):
+        if not isinstance(entry, dict):
+            return None, None
+        mid = entry.get("msgId") or entry.get("messageId") or entry.get("msgID")
+        st = entry.get("sentTime") or entry.get("sendTime") or entry.get("sent_time")
+        if mid is None or st is None:
+            return None, None
+        try:
+            if int(mid) != int(expected_msg_id):
+                return None, None
+            return int(mid), int(st)
+        except Exception:
+            if str(mid) != str(expected_msg_id):
+                return None, None
+            return mid, st
+
+    if not isinstance(resp, dict):
+        return None, None
+
+    pme = resp.get("processedMessageEntries")
+    if isinstance(pme, list):
+        for entry in pme:
+            mid, st = _match_entry(entry)
+            if mid is not None and st is not None:
+                return mid, st
+
+    for k in ("chatReplyResultList", "chatReplyResults", "resultList", "data", "results"):
+        v = resp.get(k)
+        if isinstance(v, list):
+            for entry in v:
+                mid, st = _match_entry(entry)
+                if mid is not None and st is not None:
+                    return mid, st
+
+    return _match_entry(resp)
 
 
 def _recall_llm_notices(chatroom_id: int, req_id: str):
