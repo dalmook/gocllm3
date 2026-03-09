@@ -340,6 +340,68 @@ def render_compare_period_groups_answer(
     )
 
 
+def render_grouped_dimension_answer(
+    *,
+    rows: List[Dict[str, Any]],
+    metric: str,
+    unit: str,
+    source_name: str,
+    dimension: str,
+) -> str:
+    metric_label = {
+        "sales": "판매",
+        "net_prod": "순생산",
+        "net_ipgo": "순입고",
+    }.get(metric, metric)
+    dim_label = {
+        "version": "버전",
+        "yearmonth": "년월",
+        "fam1": "FAM1",
+    }.get(dimension, dimension or "차원")
+
+    parsed = []
+    for row in rows:
+        key = str(row.get("DIMENSION_VALUE") or row.get("dimension_value") or row.get("VERSION") or row.get("version") or "").strip()
+        value = row.get("VALUE") if "VALUE" in row else row.get("value")
+        try:
+            fval = float(value or 0.0)
+        except Exception:
+            fval = 0.0
+        if key:
+            parsed.append((key, fval))
+    if not parsed:
+        return (
+            "📌 한줄 요약\n"
+            "- 그룹 데이터가 없습니다.\n\n"
+            "📊 그룹별 결과\n"
+            "- 조회 결과가 없습니다.\n\n"
+            "⚠️ 기준\n"
+            f"- 기준 source: {source_name}\n"
+            "- 최신 적재 기준 조회"
+        )
+
+    parsed.sort(key=lambda x: x[1], reverse=True)
+    top_key, top_val = parsed[0]
+    lines = [f"- {k}: {_format_number(v, f' {unit}')}" for k, v in parsed[:10]]
+    return "\n".join(
+        [
+            "📌 한줄 요약",
+            f"- {dim_label} 기준 {metric_label} 최대 항목은 {top_key}입니다.",
+            "",
+            "📊 그룹별 결과",
+            *lines,
+            "",
+            "💡 분석",
+            f"- 상위 항목 {top_key}가 {_format_number(top_val, f' {unit}')}로 가장 큽니다.",
+            "- 상위/하위 그룹 편차를 함께 보면 분산 정도를 빠르게 파악할 수 있습니다.",
+            "",
+            "⚠️ 기준",
+            f"- 기준 source: {source_name}",
+            "- 최신 적재 기준 조회",
+        ]
+    )
+
+
 def render_total_answer(
     *,
     rows: List[Dict[str, Any]],
@@ -417,8 +479,12 @@ def render_answer_rule_based(
     unit = str(slots.get("metric_unit") or "MEQ")
     source_name = str(slots.get("source_name") or "psi_simul")
     period_label = str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
+    family = str(slots.get("family") or "")
+    primary_query_id = str(primary.get("query_id") or "")
+    if not family and primary_query_id:
+        family = primary_query_id
 
-    if intent == "metric_compare_versions":
+    if intent == "metric_compare_versions" or family == "compare_versions_same_period":
         return render_compare_versions_answer(
             rows=primary_rows,
             metric=metric,
@@ -426,19 +492,27 @@ def render_answer_rule_based(
             period_label=period_label,
             source_name=source_name,
         )
-    if intent == "metric_trend_by_period":
+    if intent == "metric_trend_by_period" or family == "trend_by_period":
         return render_trend_answer(
             rows=primary_rows,
             metric=metric,
             unit=unit,
             source_name=source_name,
         )
-    if intent == "metric_compare_period_groups":
+    if intent == "metric_compare_period_groups" or family == "compare_period_groups":
         return render_compare_period_groups_answer(
             rows=primary_rows,
             metric=metric,
             unit=unit,
             source_name=source_name,
+        )
+    if intent == "metric_grouped_dimension" or family == "grouped_by_dimension":
+        return render_grouped_dimension_answer(
+            rows=primary_rows,
+            metric=metric,
+            unit=unit,
+            source_name=source_name,
+            dimension=str(slots.get("dimension") or ""),
         )
     if intent == "sales_compare":
         if primary_rows and (("VERSION" in primary_rows[0]) or ("version" in primary_rows[0])):
@@ -543,6 +617,7 @@ def render_answer_with_llm(
         "metric_compare_versions",
         "metric_trend_by_period",
         "metric_compare_period_groups",
+        "metric_grouped_dimension",
     }:
         return None
 

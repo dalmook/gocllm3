@@ -34,7 +34,7 @@ class SqlNluTest(unittest.TestCase):
             ("이번 분기 WC 몇개", "sales_total"),
             ("전분기 대비 WC 판매량 어때", "sales_compare"),
             ("올해 월별 WC 판매 추이", "metric_trend_by_period"),
-            ("1분기 버전별 판매량", "sales_grouped"),
+            ("1분기 버전별 판매량", "metric_grouped_dimension"),
             ("VH 판매", "sales_total"),
             ("올해 몇개", "sales_total"),
             ("2월 실적", "sales_total"),
@@ -51,6 +51,8 @@ class SqlNluTest(unittest.TestCase):
             ("작년 대비 올해 vl 판매 비교", "metric_compare_period_groups"),
             ("1분기 vl 순생산 추이 분석", "metric_trend_by_period"),
             ("vh vl 판매 차이 분석", "metric_compare_versions"),
+            ("fam1별 판매 보여줘", "metric_grouped_dimension"),
+            ("vh 기준 fam1별 순생산 보여줘", "metric_grouped_dimension"),
         ]
         for q, expected_intent in cases:
             tr = self._analyze(q)
@@ -150,8 +152,7 @@ class SqlNluTest(unittest.TestCase):
         self.assertEqual([], missing)
         self.assertEqual("VH", params.get("v1"))
         self.assertEqual("VL", params.get("v2"))
-        self.assertTrue(params.get("start_yyyymm"))
-        self.assertTrue(params.get("end_yyyymm"))
+        self.assertTrue(params.get("anchor_yyyymm") or (params.get("start_yyyymm") and params.get("end_yyyymm")))
 
     def test_trend_periods_slots_and_params(self):
         tr = self._analyze("2월 3월 4월 vh 트렌드 분석해줘")
@@ -189,6 +190,21 @@ class SqlNluTest(unittest.TestCase):
         self.assertEqual("202512", params.get("g1_end"))
         self.assertEqual("202601", params.get("g2_start"))
         self.assertEqual("202612", params.get("g2_end"))
+
+    def test_grouped_by_dimension_slots_and_params(self):
+        tr = self._analyze("vh 기준 fam1별 순생산 보여줘")
+        self.assertEqual("metric_grouped_dimension", tr.get("final_intent"))
+        self.assertEqual("grouped_by_dimension", tr.get("selected_query_id"))
+        slots = tr.get("final_slots") or {}
+        self.assertEqual("net_prod", slots.get("metric"))
+        self.assertEqual("fam1", slots.get("dimension"))
+        self.assertEqual(["VH"], slots.get("versions"))
+
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        params, missing = build_sql_params_with_missing(m, "vh 기준 fam1별 순생산 보여줘")
+        self.assertEqual([], missing)
+        self.assertEqual("VH", params.get("v1"))
 
 
 if __name__ == "__main__":

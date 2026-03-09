@@ -9,7 +9,7 @@
 - `app/oracle_db.py`: python-oracledb Thick mode 초기화/Pool/쿼리 실행
 - `app/sql_registry.py`: 자연어 질문용 SQL registry 매칭
 - `app/sql_period.py`: 자연어 기간(올해/전분기/최근 N개월 등) 표준화 유틸
-- `app/sql_registry.yaml`: `/sql` 전용 SQL 템플릿 등록 파일
+- `app/sql_registry.yaml`: `/sql` 메타데이터(sources/metrics/dimensions/query_families) + legacy queries
 - `app/sql_answering.py`: `/sql` 다중 SQL 실행결과를 사용자 답변으로 렌더링
 - `app/query_intent.py`: 질문 의도 분류(`general_llm`, `data_only`, `rag_only`, `hybrid`)
 - `app/hybrid_router.py`: intent별 SQL 실행 여부/실행 래퍼
@@ -28,7 +28,7 @@
 - `hybrid`: SQL + RAG 결합
 
 ## /sql 처리 흐름 (intent + slot)
-`/sql` 모드는 등록된 SQL 템플릿만 실행하며, 내부적으로 아래 순서로 동작합니다.
+`/sql` 모드는 metadata-driven planner를 우선 실행하고, 실패 시 legacy templates로 fallback 합니다.
 1. `normalize_question(question)`
 2. `extract_slots_rule_based(question)`:
   metric / aggregation / period / version / dimension / compare / trend
@@ -36,10 +36,12 @@
 4. 모호할 때만 `classify_sql_intent_with_llm` 보조 판별(JSON only)
 5. `infer_default_period(intent, slots, question)`으로 기간 미지정 보정
 6. `resolve_period(slots)`으로 `start_yyyymm/end_yyyymm` 계산
-7. `select_query_template(intent, slots)`로 YAML 템플릿 선택
-8. `build_execution_plan(question, intent, slots)`로 primary/aux SQL 계획 생성
-9. `execute_registered_sql(query_id, params)` (등록 템플릿만 실행)
-10. `render_answer_rule_based()` 후 필요 시 `render_answer_with_llm()` 보조
+7. `build_execution_plan_from_slots(...)`로 `plan(JSON)` 생성
+8. `build_sql_from_plan(...)`로 whitelist 기반 safe SQL 조립
+9. 실패 시 `select_query_template(intent, slots)` legacy fallback
+10. `build_execution_plan(question, intent, slots)`로 primary/aux SQL 계획 생성
+11. `execute_registered_sql(query_id, params)`
+12. `render_answer_rule_based()` 후 필요 시 `render_answer_with_llm()` 보조
 
 ## 1단계 Prefix 정책 (운영 안정화)
 - SQL 조회는 `/sql ...` 입력일 때만 수행합니다.
@@ -51,7 +53,13 @@
 - `/용어 hbm`
 
 ## SQL 등록 방법 (YAML)
-`/sql` 실행 대상은 `app/sql_registry.yaml`의 `queries`에 추가합니다.
+신규 확장은 `queries`가 아니라 아래 메타데이터에 추가하는 것을 기본으로 합니다.
+- `sources`: 테이블/컬럼/기본필터/스냅샷 규칙
+- `metrics`: 집계 대상 컬럼
+- `dimensions`: 필터/그룹 기준 축
+- `query_families`: 질의 형태
+
+`queries`는 legacy compatibility fallback 용도로 유지합니다.
 
 필드 예시:
 ```yaml

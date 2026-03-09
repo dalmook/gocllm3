@@ -7,39 +7,90 @@ sources:
     version_column: VERSION
     latest_snapshot_strategy: "max_snapshot_with_filters"
     default_filters:
-      type: "P"
-      p_module: "PMIX"
-      s_module: "SOKBO"
-    dimensions: ["version", "yearmonth"]
+      TYPE: "P"
+      P_MODULE: "PMIX"
+      S_MODULE: "SOKBO"
+    columns:
+      YEARMONTH:
+        description: "기준 년월 YYYYMM"
+      WORKDATE:
+        description: "적재 기준일"
+      VERSION:
+        description: "버전 코드 예: VH, VL"
+      FAM1:
+        description: "FAM1 분류"
+      SALES_MEQ:
+        description: "판매 수량"
+      NET_PROD_MEQ:
+        description: "순생산 수량"
+      NET_IPGO_MEQ:
+        description: "순입고 수량"
 
 metrics:
   sales:
     aliases: ["판매", "판매량", "sales", "매출", "실적"]
     source: psi_simul
     value_column: SALES_MEQ
-    unit: MEQ
+    unit: "MEQ"
+    description: "판매 수량"
   net_prod:
     aliases: ["순생산", "생산", "net production", "net_prod"]
     source: psi_simul
     value_column: NET_PROD_MEQ
-    unit: MEQ
+    unit: "MEQ"
+    description: "순생산 수량"
   net_ipgo:
     aliases: ["순입고", "입고", "net ipgo", "net_ipgo"]
     source: psi_simul
     value_column: NET_IPGO_MEQ
-    unit: MEQ
+    unit: "MEQ"
+    description: "순입고 수량"
+
+dimensions:
+  version:
+    source: psi_simul
+    column: VERSION
+    aliases: ["버전", "version", "버전별", "vh", "vl", "wc"]
+    supports_filter: true
+    supports_groupby: true
+    description: "버전 축"
+  yearmonth:
+    source: psi_simul
+    column: YEARMONTH
+    aliases: ["월", "년월", "month", "월별"]
+    supports_filter: true
+    supports_groupby: true
+    description: "년월 축"
+  fam1:
+    source: psi_simul
+    column: FAM1
+    aliases: ["fam1", "패밀리1", "family1", "fam1별"]
+    supports_filter: true
+    supports_groupby: true
+    description: "FAM1 축"
 
 query_families:
   total_single_period:
     source: psi_simul
-    description: "단일 기간 단일/다중 버전 합계"
+    description: "단일 기간 합계"
+  total_period_range:
+    source: psi_simul
+    description: "기간 범위 합계"
   compare_versions_same_period:
     source: psi_simul
     description: "같은 기간 버전 비교"
   trend_by_period:
     source: psi_simul
     description: "여러 기간 추이"
+  grouped_by_dimension:
+    source: psi_simul
+    description: "지정 차원 그룹 합계"
+  compare_period_groups:
+    source: psi_simul
+    description: "기간 그룹 비교"
 
+# Legacy compatibility only:
+# 아래 queries는 metadata-driven planner/builder가 처리하지 못한 구문의 fallback 용도로만 유지한다.
 queries:
   - id: sales_total_month
     intent: sales_total
@@ -270,54 +321,11 @@ queries:
       compare_start_yyyymm:
         type: yyyymm
         required: true
-        aliases: ["비교시작월", "prev_start"]
+        aliases: ["비교시작월", "compare_from", "prev_start"]
       compare_end_yyyymm:
         type: yyyymm
         required: true
-        aliases: ["비교종료월", "prev_end"]
+        aliases: ["비교종료월", "compare_to", "prev_end"]
     result:
       mode: table
-      empty_message: "해당 조건의 비교 데이터가 없습니다."
-
-  - id: psi_sales_by_month
-    intent: sales_total
-    deprecated: true
-    description: "(deprecated) 특정 월/버전 판매량 합계"
-    keywords: ["판매", "판매량", "매출", "psi", "버전", "월", "vh", "version"]
-    patterns:
-      - "\\d{1,2}월.*(판매|판매량|매출)"
-      - "(version|버전|vh).*판매"
-    supported_slots: ["metric", "aggregation", "period_type", "period_value", "version"]
-    default_aggregation: "sum"
-    supports_compare: false
-    supports_trend: false
-    groupable_dimensions: []
-    sql: |
-      SELECT NVL(SUM(SALES_MEQ), 0) AS sales
-      FROM mst_psi_simul_report
-      WHERE 1=1
-        AND workdate = (
-          SELECT MAX(workdate)
-          FROM mst_psi_simul_report
-          WHERE P_MODULE = 'PMIX'
-            AND S_MODULE = 'SOKBO'
-            AND UPPER(VERSION) = UPPER(:version)
-            AND YEARMONTH = :yearmonth
-        )
-        AND P_MODULE = 'PMIX'
-        AND S_MODULE = 'SOKBO'
-        AND UPPER(VERSION) = UPPER(:version)
-        AND YEARMONTH = :yearmonth
-    params:
-      version:
-        type: string
-        required: true
-        aliases: ["버전", "VERSION", "vh", "version"]
-      yearmonth:
-        type: yyyymm
-        required: true
-        aliases: ["월", "년월", "YEARMONTH", "month"]
-    result:
-      mode: scalar
-      field: sales
-      empty_message: "해당 조건의 판매 데이터가 없습니다."
+      empty_message: "해당 조건의 기간 비교 데이터가 없습니다."

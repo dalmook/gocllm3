@@ -1899,10 +1899,10 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         if force_sql_mode and not sql_match:
             answer = (
                 "📌 한줄 요약\n"
-                "- /sql 질문으로 처리했지만 매칭 가능한 SQL 템플릿을 찾지 못했습니다.\n\n"
+                "- /sql 질문으로 처리했지만 실행 가능한 plan을 만들지 못했습니다.\n\n"
                 "💡 참고\n"
-                "- 현재 /sql은 등록된 SQL registry 항목만 실행합니다.\n"
-                "- 예: /sql 2월 버전 vh 판매 몇개야"
+                "- 현재 /sql은 metadata-driven planner/builder를 우선 사용하고, 필요 시 legacy queries로 fallback 합니다.\n"
+                "- 예: /sql 2월 vh 판매 알려줘"
             )
             _send_answer_with_feedback_card(answer)
             save_conversation_memory(
