@@ -86,6 +86,7 @@ queries:
 ## 주요 로그 Prefix
 - `[ORACLE]`
 - `[SQL_REGISTRY]`
+- `[SQL_DEBUG]`
 - `[INTENT]`
 - `[SQL_EXEC]`
 - `[SQL_RESULT]`
