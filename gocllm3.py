@@ -240,6 +240,34 @@ def _answer_preview(text: str, max_len: int = 280) -> str:
         return value
     return value[: max_len - 3] + "..."
 
+
+def _sanitize_glossary_answer(answer: str) -> str:
+    text = answer or ""
+    lines = text.splitlines()
+    cleaned_lines: List[str] = []
+    in_doc_section = False
+    heading_pattern = re.compile(r"^\s*[📌📂💡⚠️🔗]")
+    date_prefix_pattern = re.compile(r"^(\s*[-•]\s*)\((\d{4}-\d{2}-\d{2})(?:[^\)]*)\)\s*")
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("📂 문서 기반 답변"):
+            in_doc_section = True
+            cleaned_lines.append(line)
+            continue
+        if in_doc_section and heading_pattern.match(stripped) and not stripped.startswith("📂 문서 기반 답변"):
+            in_doc_section = False
+
+        if "기준일시" in stripped:
+            continue
+
+        if in_doc_section:
+            line = date_prefix_pattern.sub(r"\1", line)
+
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
+
 # =========================
 # 1) AES Cipher (Knox key 기반)
 # =========================
@@ -2391,6 +2419,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             f"[RAG Final] selected_rag_domain={selected_rag_domain} used_rag={stats['used_rag']} "
             f"fallback_reason={stats.get('fallback_reason','')}"
         )
+        if force_glossary_mode:
+            answer = _sanitize_glossary_answer(answer)
         print(f"[HYBRID] sql_used={sql_used} rag_used={stats['used_rag']}")
         print(f"[ANSWER] mode={final_intent} llm_used={stats['llm_calls'] > 0}")
         _send_answer_with_feedback_card(answer)
