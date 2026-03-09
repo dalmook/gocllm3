@@ -152,6 +152,7 @@ _INTENT_VALUES = {
     "sales_compare",
     "metric_compare_versions",
     "metric_trend_by_period",
+    "metric_compare_period_groups",
 }
 
 
@@ -545,6 +546,45 @@ def resolve_periods(question: str, slots: Dict[str, Any], *, now: Optional[datet
             periods.append(f"{yy}{mm}")
 
     if not periods:
+        m_range = re.search(r"(1[0-2]|0?[1-9])\s*월\s*부터\s*(1[0-2]|0?[1-9])\s*월\s*까지", norm)
+        if m_range:
+            sm = int(m_range.group(1))
+            em = int(m_range.group(2))
+            if sm <= em:
+                for mm in range(sm, em + 1):
+                    periods.append(f"{current.year:04d}{mm:02d}")
+
+    if not periods:
+        m_recent = re.search(r"최근\s*(\d+)\s*개월", norm)
+        if m_recent:
+            n = max(1, int(m_recent.group(1)))
+            yy, mm = current.year, current.month
+            acc = []
+            for _ in range(n):
+                acc.append(f"{yy:04d}{mm:02d}")
+                mm -= 1
+                if mm == 0:
+                    yy -= 1
+                    mm = 12
+            periods.extend(reversed(acc))
+
+    if not periods and ("상반기" in norm or "하반기" in norm):
+        if "상반기" in norm:
+            rng = range(1, 7)
+        else:
+            rng = range(7, 13)
+        for mm in rng:
+            periods.append(f"{current.year:04d}{mm:02d}")
+
+    if not periods:
+        m_q = re.search(r"([1-4])\s*분기", norm)
+        if m_q:
+            q = int(m_q.group(1))
+            start = (q - 1) * 3 + 1
+            for mm in range(start, start + 3):
+                periods.append(f"{current.year:04d}{mm:02d}")
+
+    if not periods:
         month_nums = re.findall(r"(?<!\d)(1[0-2]|0?[1-9])\s*월", norm)
         for m in month_nums:
             periods.append(f"{current.year:04d}{int(m):02d}")
@@ -561,12 +601,41 @@ def resolve_periods(question: str, slots: Dict[str, Any], *, now: Optional[datet
     return uniq
 
 
+def resolve_period_groups(question: str, slots: Dict[str, Any], *, now: Optional[datetime] = None) -> List[Dict[str, str]]:
+    current = now or datetime.now()
+    norm = normalize_question(question)
+    groups: List[Dict[str, str]] = []
+
+    for a, b in re.findall(r"\b(20\d{2})\s*년?\s*대비\s*(20\d{2})\s*년?\b", norm):
+        groups.append({"label": a, "start_yyyymm": f"{a}01", "end_yyyymm": f"{a}12"})
+        groups.append({"label": b, "start_yyyymm": f"{b}01", "end_yyyymm": f"{b}12"})
+        return groups
+
+    for a, b in re.findall(r"\b(\d{2})\s*년\s*대비\s*(\d{2})\s*년\b", norm):
+        yy1 = f"20{int(a):02d}"
+        yy2 = f"20{int(b):02d}"
+        groups.append({"label": yy1, "start_yyyymm": f"{yy1}01", "end_yyyymm": f"{yy1}12"})
+        groups.append({"label": yy2, "start_yyyymm": f"{yy2}01", "end_yyyymm": f"{yy2}12"})
+        return groups
+
+    compact = norm.replace(" ", "")
+    if ("작년" in compact and "올해" in compact) or ("전년" in compact and "올해" in compact):
+        y1 = current.year - 1
+        y2 = current.year
+        groups.append({"label": str(y1), "start_yyyymm": f"{y1:04d}01", "end_yyyymm": f"{y1:04d}12"})
+        groups.append({"label": str(y2), "start_yyyymm": f"{y2:04d}01", "end_yyyymm": f"{y2:04d}12"})
+    return groups
+
+
 def infer_query_family(question: str, slots: Dict[str, Any]) -> str:
     norm = normalize_question(question)
     versions = resolve_versions(question, slots)
     periods = resolve_periods(question, slots)
+    period_groups = resolve_period_groups(question, slots)
     compare = str(slots.get("compare") or "")
     trend = bool(slots.get("trend"))
+    if period_groups and (compare or "대비" in norm):
+        return "compare_period_groups"
     if trend or any(k in norm for k in ("트렌드", "추이", "흐름")):
         return "trend_by_period"
     if compare or len(versions) >= 2 or any(k in norm for k in ("비교", "차이", "대비", "vs")):
@@ -592,6 +661,7 @@ def build_execution_plan_from_slots(question: str, slots: Dict[str, Any], *, now
     source = resolve_source_for_metric(metric)
     versions = resolve_versions(question, slots)
     periods = resolve_periods(question, slots, now=now)
+    period_groups = resolve_period_groups(question, slots, now=now)
     family = infer_query_family(question, slots)
     analysis = bool((slots or {}).get("analysis"))
     return {
@@ -600,6 +670,7 @@ def build_execution_plan_from_slots(question: str, slots: Dict[str, Any], *, now
         "family": family,
         "versions": versions,
         "periods": periods,
+        "period_groups": period_groups,
         "analysis": analysis,
         "intent_hint": str((slots or {}).get("intent_hint") or ""),
     }
@@ -612,6 +683,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
     intent_hint = str(plan.get("intent_hint") or "")
     versions = [str(x).strip().upper() for x in (plan.get("versions") or []) if str(x).strip()]
     periods = [str(x).strip() for x in (plan.get("periods") or []) if str(x).strip()]
+    period_groups = [x for x in (plan.get("period_groups") or []) if isinstance(x, dict)]
 
     source = _SQL_SOURCES.get(source_id)
     metric = _SQL_METRICS.get(metric_id)
@@ -619,7 +691,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
         return None
     if metric.source != source.id:
         return None
-    if family not in {"total_single_period", "compare_versions_same_period", "trend_by_period"}:
+    if family not in {"total_single_period", "compare_versions_same_period", "trend_by_period", "compare_period_groups"}:
         return None
 
     table = _safe_identifier(source.table)
@@ -648,6 +720,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
         "source_name": source.id,
         "versions": versions,
         "periods": periods,
+        "period_groups": period_groups,
         "analysis": bool(plan.get("analysis")),
     }
 
@@ -699,6 +772,32 @@ ORDER BY {period_column}, UPPER({version_column})
 """.strip()
         intent = "metric_trend_by_period"
         query_id = "trend_by_period"
+    elif family == "compare_period_groups":
+        if len(period_groups) < 2:
+            return None
+        group_cases = []
+        for idx, grp in enumerate(period_groups, start=1):
+            key_s = f"g{idx}_start"
+            key_e = f"g{idx}_end"
+            params[key_s] = SQLParamSpec(type="yyyymm", required=True, aliases=[key_s])
+            params[key_e] = SQLParamSpec(type="yyyymm", required=True, aliases=[key_e])
+            group_cases.append(f"WHEN {period_column} BETWEEN :{key_s} AND :{key_e} THEN '{grp.get('label') or f'G{idx}'}'")
+        sql = f"""
+SELECT
+  CASE {' '.join(group_cases)} ELSE 'OTHER' END AS PERIOD_GROUP,
+  NVL(SUM({value_column}),0) AS VALUE
+FROM {table}
+WHERE 1=1
+  AND {latest_snapshot_filter}
+  {default_filter_sql}
+  AND ({' OR '.join([f'({period_column} BETWEEN :g{i}_start AND :g{i}_end)' for i in range(1, len(period_groups)+1)])})
+  {version_filter}
+GROUP BY CASE {' '.join(group_cases)} ELSE 'OTHER' END
+HAVING CASE {' '.join(group_cases)} ELSE 'OTHER' END <> 'OTHER'
+ORDER BY PERIOD_GROUP
+""".strip()
+        intent = "metric_compare_period_groups"
+        query_id = "compare_period_groups"
     else:
         sql = f"""
 SELECT UPPER({version_column}) AS VERSION, NVL(SUM({value_column}),0) AS VALUE
@@ -731,12 +830,17 @@ ORDER BY UPPER({version_column})
         deprecated=False,
     )
 
+    period_payload = {"start_yyyymm": start_yyyymm, "end_yyyymm": end_yyyymm, **dict(period or {})}
+    for idx, grp in enumerate(period_groups, start=1):
+        period_payload[f"g{idx}_start"] = str(grp.get("start_yyyymm") or "")
+        period_payload[f"g{idx}_end"] = str(grp.get("end_yyyymm") or "")
+
     return SQLRegistryMatch(
         item=item,
         score=30.0,
         intent=intent,
         slots=slot_meta,
-        period={"start_yyyymm": start_yyyymm, "end_yyyymm": end_yyyymm, **dict(period or {})},
+        period=period_payload,
         llm_used=False,
         fallback_used=False,
     )
@@ -821,6 +925,7 @@ def classify_intent_rule_based(question: str, slots: Dict[str, Any]) -> Tuple[st
     norm = normalize_question(question)
     versions = resolve_versions(question, slots)
     metric = resolve_metric(question, slots) or "sales"
+    period_groups = resolve_period_groups(question, slots)
     compare_token = str(slots.get("compare") or "")
     compare_requested = bool(compare_token) or len(versions) >= 2
 
@@ -831,12 +936,15 @@ def classify_intent_rule_based(question: str, slots: Dict[str, Any]) -> Tuple[st
         "sales_compare": 0.0,
         "metric_compare_versions": 0.0,
         "metric_trend_by_period": 0.0,
+        "metric_compare_period_groups": 0.0,
     }
 
     if slots.get("compare"):
         scores["sales_compare"] += 2.2
     if compare_requested and len(versions) >= 2 and metric in ("sales", "net_prod", "net_ipgo"):
         scores["metric_compare_versions"] += 3.0
+    if compare_requested and len(period_groups) >= 2 and metric in ("sales", "net_prod", "net_ipgo"):
+        scores["metric_compare_period_groups"] += 3.2
     if slots.get("trend"):
         scores["sales_trend"] += 2.2
         if metric in ("sales", "net_prod", "net_ipgo"):
@@ -858,6 +966,8 @@ def classify_intent_rule_based(question: str, slots: Dict[str, Any]) -> Tuple[st
         reasons.append("compare keyword")
     if len(versions) >= 2:
         reasons.append("multi-version detected")
+    if len(period_groups) >= 2:
+        reasons.append("period-groups detected")
     if slots.get("trend"):
         reasons.append("trend keyword")
     if slots.get("dimension"):
@@ -905,6 +1015,17 @@ def infer_default_period(intent: str, slots: Dict[str, Any], question: str) -> T
         merged["period_value"] = "this_month"
         reason = "기간 지정이 없어 이번달 기준으로 버전 비교를 조회했습니다."
         inferred = True
+    elif intent == "metric_compare_period_groups":
+        merged["period_type"] = "year"
+        merged["period_value"] = "this_year"
+        if not merged.get("period_groups"):
+            yy = datetime.now().year
+            merged["period_groups"] = [
+                {"label": str(yy - 1), "start_yyyymm": f"{yy-1:04d}01", "end_yyyymm": f"{yy-1:04d}12"},
+                {"label": str(yy), "start_yyyymm": f"{yy:04d}01", "end_yyyymm": f"{yy:04d}12"},
+            ]
+        reason = "비교 기간이 명확하지 않아 작년 대비 올해 기준으로 조회했습니다."
+        inferred = True
 
     if not inferred and any(x in norm for x in ("어때", "흐름", "추이")) and not merged.get("period_value"):
         merged["period_type"] = "relative"
@@ -923,7 +1044,7 @@ def _sanitize_slots(raw_slots: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     allowed_keys = {
         "metric", "aggregation", "period_type", "period_value",
-        "periods", "dimension", "version", "versions", "compare", "compare_flag", "analysis", "trend",
+        "periods", "period_groups", "dimension", "version", "versions", "compare", "compare_flag", "analysis", "trend",
         "metric_unit", "source_name",
     }
     for k, v in raw_slots.items():
@@ -1107,10 +1228,11 @@ def build_match_for_query_id(
 ) -> Optional[SQLRegistryMatch]:
     item = get_sql_registry_item_by_id(query_id)
     if item is None:
-        if str(query_id or "") in {"compare_versions_same_period", "trend_by_period", "total_single_period"}:
+        if str(query_id or "") in {"compare_versions_same_period", "trend_by_period", "total_single_period", "compare_period_groups"}:
             metric = str((slots or {}).get("metric") or "sales")
             versions = [str(x).strip().upper() for x in ((slots or {}).get("versions") or []) if str(x).strip()]
             periods = [str(x).strip() for x in ((slots or {}).get("periods") or []) if str(x).strip()]
+            period_groups = [x for x in ((slots or {}).get("period_groups") or []) if isinstance(x, dict)]
             source = resolve_source_for_metric(metric)
             dynamic = build_sql_from_plan(
                 {
@@ -1119,6 +1241,7 @@ def build_match_for_query_id(
                     "family": str(query_id or ""),
                     "versions": versions,
                     "periods": periods,
+                    "period_groups": period_groups,
                     "analysis": bool((slots or {}).get("analysis")),
                 },
                 period=period,
@@ -1161,6 +1284,8 @@ def build_execution_plan(question: str, intent: str, slots: Dict[str, Any], sele
             primary = "compare_versions_same_period"
         elif intent == "metric_trend_by_period":
             primary = "trend_by_period"
+        elif intent == "metric_compare_period_groups":
+            primary = "compare_period_groups"
 
     if primary:
         plan.append(SQLExecutionPlanStep(query_id=primary, role="primary", reason="intent-primary"))
@@ -1213,6 +1338,7 @@ def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Di
         merged_slots["source_name"] = metric_spec.source
     merged_slots["versions"] = resolve_versions(question, merged_slots)
     merged_slots["periods"] = resolve_periods(question, merged_slots, now=now)
+    merged_slots["period_groups"] = resolve_period_groups(question, merged_slots, now=now)
     if len(merged_slots.get("versions") or []) >= 2:
         merged_slots["compare"] = True
     merged_slots, period_inferred, period_infer_reason = infer_default_period(final_intent, merged_slots, question)
@@ -1342,6 +1468,7 @@ def _fill_semantic_params(
 ) -> None:
     versions = [str(x).strip().upper() for x in (slots.get("versions") or []) if str(x).strip()]
     periods = [str(x).strip() for x in (slots.get("periods") or []) if str(x).strip()]
+    period_groups = [x for x in (slots.get("period_groups") or []) if isinstance(x, dict)]
     for pname in item.params.keys():
         key = pname.lower()
         if key in ("version", "ver") and slots.get("version"):
@@ -1354,6 +1481,14 @@ def _fill_semantic_params(
             idx = int(key[1:]) - 1
             if 0 <= idx < len(periods):
                 result[pname] = periods[idx]
+        elif re.fullmatch(r"g\d+_start", key) and period_groups:
+            idx = int(key[1 : key.index("_")]) - 1
+            if 0 <= idx < len(period_groups):
+                result[pname] = str(period_groups[idx].get("start_yyyymm") or "")
+        elif re.fullmatch(r"g\d+_end", key) and period_groups:
+            idx = int(key[1 : key.index("_")]) - 1
+            if 0 <= idx < len(period_groups):
+                result[pname] = str(period_groups[idx].get("end_yyyymm") or "")
         elif key in ("yearmonth", "yyyymm", "anchor_yyyymm"):
             result[pname] = period.anchor_yyyymm
         elif key in ("start_yyyymm", "from_yyyymm", "start_ym"):

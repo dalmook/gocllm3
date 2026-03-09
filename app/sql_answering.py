@@ -269,6 +269,113 @@ def render_trend_answer(
     )
 
 
+def render_compare_period_groups_answer(
+    *,
+    rows: List[Dict[str, Any]],
+    metric: str,
+    unit: str,
+    source_name: str,
+) -> str:
+    metric_label = {
+        "sales": "판매",
+        "net_prod": "순생산",
+        "net_ipgo": "순입고",
+    }.get(metric, metric)
+
+    parsed = []
+    for row in rows:
+        label = str(row.get("PERIOD_GROUP") or row.get("period_group") or row.get("LABEL") or "").strip()
+        value = row.get("VALUE") if "VALUE" in row else row.get("value")
+        try:
+            fval = float(value or 0.0)
+        except Exception:
+            fval = 0.0
+        if label:
+            parsed.append((label, fval))
+
+    if len(parsed) < 2:
+        return (
+            "📌 한줄 요약\n"
+            "- 기간 그룹 비교 데이터가 부족합니다.\n\n"
+            "📊 기간 그룹 비교\n"
+            "- 비교할 그룹 2개 이상이 필요합니다.\n\n"
+            "⚠️ 기준\n"
+            f"- 기준 source: {source_name}\n"
+            "- 최신 적재 기준 조회"
+        )
+
+    parsed.sort(key=lambda x: x[0])
+    left_label, left_val = parsed[0]
+    right_label, right_val = parsed[1]
+    if right_val >= left_val:
+        top_label, top_val = right_label, right_val
+        low_label, low_val = left_label, left_val
+    else:
+        top_label, top_val = left_label, left_val
+        low_label, low_val = right_label, right_val
+
+    stat = compute_diff_and_ratio(top_val, low_val)
+    ratio_text = f"{stat['ratio']:+.1f}%"
+    direction = "높습니다" if stat["diff"] >= 0 else "낮습니다"
+
+    return "\n".join(
+        [
+            "📌 한줄 요약",
+            f"- {metric_label}은 {top_label}이 {low_label} 대비 {_format_number(abs(stat['diff']), f' {unit}')} {direction}.",
+            "",
+            "📊 기간 그룹 비교",
+            f"- {left_label}: {_format_number(left_val, f' {unit}')}",
+            f"- {right_label}: {_format_number(right_val, f' {unit}')}",
+            f"- 차이: {_format_number(stat['diff'], f' {unit}')}",
+            f"- 증감률: {ratio_text}",
+            "",
+            "💡 분석",
+            "- 연간/그룹 단위 변화 폭을 우선 확인하는 비교입니다.",
+            "- 필요하면 월 단위 드릴다운으로 원인 구간을 추가 확인할 수 있습니다.",
+            "",
+            "⚠️ 기준",
+            f"- 기준 source: {source_name}",
+            "- 최신 적재 기준 조회",
+        ]
+    )
+
+
+def render_total_answer(
+    *,
+    rows: List[Dict[str, Any]],
+    metric: str,
+    unit: str,
+    period_label: str,
+    source_name: str,
+    version_hint: str = "전체",
+) -> str:
+    total = 0.0
+    if rows:
+        if ("VALUE" in rows[0]) or ("value" in rows[0]):
+            for row in rows:
+                try:
+                    total += float(row.get("VALUE") if "VALUE" in row else row.get("value") or 0.0)
+                except Exception:
+                    continue
+        else:
+            picked = _pick_scalar_value(rows)
+            total = float(picked or 0.0)
+    return "\n".join(
+        [
+            "📌 한줄 요약",
+            f"- {period_label} 기준 {version_hint} {metric} 합계는 {_format_number(total, f' {unit}')}입니다.",
+            "",
+            "📊 데이터 기반 답변",
+            f"- 합계: {_format_number(total, f' {unit}')}",
+            "",
+            "⚠️ 기준",
+            f"- 기준 기간: {period_label}",
+            f"- 기준 source: {source_name}",
+            "- 최신 적재 기준 조회",
+        ]
+    )
+
+
 def _top_months(rows: List[Dict[str, Any]], top_n: int = 2) -> List[str]:
     vals = []
     for r in rows:
@@ -326,6 +433,13 @@ def render_answer_rule_based(
             unit=unit,
             source_name=source_name,
         )
+    if intent == "metric_compare_period_groups":
+        return render_compare_period_groups_answer(
+            rows=primary_rows,
+            metric=metric,
+            unit=unit,
+            source_name=source_name,
+        )
     if intent == "sales_compare":
         if primary_rows and (("VERSION" in primary_rows[0]) or ("version" in primary_rows[0])):
             return render_compare_versions_answer(
@@ -362,13 +476,14 @@ def render_answer_rule_based(
             data_lines.append(f"- 상위 버전: {', '.join(top)}")
     else:
         if primary_rows and (("VERSION" in primary_rows[0]) or ("version" in primary_rows[0])) and (("VALUE" in primary_rows[0]) or ("value" in primary_rows[0])):
-            top = []
-            for r in primary_rows[:5]:
-                ver = str(r.get("VERSION") or r.get("version") or "-")
-                val = r.get("VALUE") if "VALUE" in r else r.get("value")
-                top.append(f"{ver} {_format_number(val, f' {unit}')}")
-            summary = f"{period_label} 기준 {metric}를 조회했습니다."
-            data_lines.append(f"- 버전별 값: {', '.join(top)}")
+            return render_total_answer(
+                rows=primary_rows,
+                metric=metric,
+                unit=unit,
+                period_label=period_label,
+                source_name=source_name,
+                version_hint="전체",
+            )
         else:
             total = _pick_scalar_value(primary_rows)
             if total is None:
@@ -424,7 +539,11 @@ def render_answer_with_llm(
     results: List[Dict[str, Any]],
     period_infer_reason: str = "",
 ) -> Optional[str]:
-    if not bool((slots or {}).get("analysis")) and intent in {"metric_compare_versions", "metric_trend_by_period"}:
+    if not bool((slots or {}).get("analysis")) and intent in {
+        "metric_compare_versions",
+        "metric_trend_by_period",
+        "metric_compare_period_groups",
+    }:
         return None
 
     payload = {

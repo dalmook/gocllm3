@@ -46,6 +46,11 @@ class SqlNluTest(unittest.TestCase):
             ("version vh vs vl 판매 비교", "metric_compare_versions"),
             ("2월 3월 4월 vh 트렌드 분석해줘", "metric_trend_by_period"),
             ("2월 vh 판매 알려줘", "sales_total"),
+            ("vh 25년 대비 26년 순입고 비교 분석해줘", "metric_compare_period_groups"),
+            ("2월부터 5월까지 판매 트렌드 알려줘", "metric_trend_by_period"),
+            ("작년 대비 올해 vl 판매 비교", "metric_compare_period_groups"),
+            ("1분기 vl 순생산 추이 분석", "metric_trend_by_period"),
+            ("vh vl 판매 차이 분석", "metric_compare_versions"),
         ]
         for q, expected_intent in cases:
             tr = self._analyze(q)
@@ -164,6 +169,26 @@ class SqlNluTest(unittest.TestCase):
         self.assertEqual("202603", params.get("p2"))
         self.assertEqual("202604", params.get("p3"))
         self.assertEqual("VH", params.get("v1"))
+
+    def test_compare_period_groups_slots_and_params(self):
+        tr = self._analyze("vh 25년 대비 26년 순입고 비교 분석해줘")
+        self.assertEqual("metric_compare_period_groups", tr.get("final_intent"))
+        slots = tr.get("final_slots") or {}
+        self.assertEqual("net_ipgo", slots.get("metric"))
+        self.assertEqual(["VH"], slots.get("versions"))
+        groups = slots.get("period_groups") or []
+        self.assertEqual(2, len(groups))
+        self.assertEqual("202501", groups[0].get("start_yyyymm"))
+        self.assertEqual("202612", groups[1].get("end_yyyymm"))
+
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        params, missing = build_sql_params_with_missing(m, "vh 25년 대비 26년 순입고 비교 분석해줘")
+        self.assertEqual([], missing)
+        self.assertEqual("202501", params.get("g1_start"))
+        self.assertEqual("202512", params.get("g1_end"))
+        self.assertEqual("202601", params.get("g2_start"))
+        self.assertEqual("202612", params.get("g2_end"))
 
 
 if __name__ == "__main__":
