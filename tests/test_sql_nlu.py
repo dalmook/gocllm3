@@ -33,17 +33,19 @@ class SqlNluTest(unittest.TestCase):
             ("올해 WC 판매량 얼마야", "sales_total"),
             ("이번 분기 WC 몇개", "sales_total"),
             ("전분기 대비 WC 판매량 어때", "sales_compare"),
-            ("올해 월별 WC 판매 추이", "sales_trend"),
+            ("올해 월별 WC 판매 추이", "metric_trend_by_period"),
             ("1분기 버전별 판매량", "sales_grouped"),
             ("VH 판매", "sales_total"),
             ("올해 몇개", "sales_total"),
             ("2월 실적", "sales_total"),
-            ("최근 3개월 판매 추이", "sales_trend"),
+            ("최근 3개월 판매 추이", "metric_trend_by_period"),
             ("vh와 vl 순생산 비교 분석해줘", "metric_compare_versions"),
             ("vh와 vl 판매 비교 분석해줘", "metric_compare_versions"),
             ("vh와 vl 순입고 비교 분석해줘", "metric_compare_versions"),
             ("2월 vh와 vl 순생산 비교 분석해줘", "metric_compare_versions"),
             ("version vh vs vl 판매 비교", "metric_compare_versions"),
+            ("2월 3월 4월 vh 트렌드 분석해줘", "metric_trend_by_period"),
+            ("2월 vh 판매 알려줘", "sales_total"),
         ]
         for q, expected_intent in cases:
             tr = self._analyze(q)
@@ -145,6 +147,23 @@ class SqlNluTest(unittest.TestCase):
         self.assertEqual("VL", params.get("v2"))
         self.assertTrue(params.get("start_yyyymm"))
         self.assertTrue(params.get("end_yyyymm"))
+
+    def test_trend_periods_slots_and_params(self):
+        tr = self._analyze("2월 3월 4월 vh 트렌드 분석해줘")
+        self.assertEqual("metric_trend_by_period", tr.get("final_intent"))
+        slots = tr.get("final_slots") or {}
+        self.assertEqual(["202602", "202603", "202604"], slots.get("periods"))
+        self.assertEqual(["VH"], slots.get("versions"))
+        self.assertTrue(slots.get("analysis"))
+
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        params, missing = build_sql_params_with_missing(m, "2월 3월 4월 vh 트렌드 분석해줘")
+        self.assertEqual([], missing)
+        self.assertEqual("202602", params.get("p1"))
+        self.assertEqual("202603", params.get("p2"))
+        self.assertEqual("202604", params.get("p3"))
+        self.assertEqual("VH", params.get("v1"))
 
 
 if __name__ == "__main__":

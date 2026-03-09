@@ -1,13 +1,16 @@
 sources:
   psi_simul:
     table: mst_psi_simul_report
+    description: "PSI 시뮬레이션 리포트"
     period_column: YEARMONTH
-    workdate_column: WORKDATE
+    snapshot_column: WORKDATE
     version_column: VERSION
+    latest_snapshot_strategy: "max_snapshot_with_filters"
     default_filters:
-      - "P_MODULE = 'PMIX'"
-      - "S_MODULE = 'SOKBO'"
-    latest_snapshot_rule: "{workdate_column} = (SELECT MAX({workdate_column}) FROM {table} WHERE {period_column} BETWEEN :start_yyyymm AND :end_yyyymm{default_filter_sql})"
+      type: "P"
+      p_module: "PMIX"
+      s_module: "SOKBO"
+    dimensions: ["version", "yearmonth"]
 
 metrics:
   sales:
@@ -27,18 +30,15 @@ metrics:
     unit: MEQ
 
 query_families:
-  total_single_version_same_period:
+  total_single_period:
     source: psi_simul
-    description: "동일 기간 단일 버전 합계"
+    description: "단일 기간 단일/다중 버전 합계"
   compare_versions_same_period:
     source: psi_simul
-    description: "동일 기간 다중 버전 비교"
-  grouped_by_version_same_period:
+    description: "같은 기간 버전 비교"
+  trend_by_period:
     source: psi_simul
-    description: "동일 기간 버전별 집계"
-  trend_monthly:
-    source: psi_simul
-    description: "월별 추이"
+    description: "여러 기간 추이"
 
 queries:
   - id: sales_total_month

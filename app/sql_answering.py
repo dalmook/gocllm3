@@ -174,6 +174,101 @@ def render_compare_versions_answer(
     )
 
 
+def _ym_label(yyyymm: str) -> str:
+    if re.fullmatch(r"20\d{2}(0[1-9]|1[0-2])", str(yyyymm or "")):
+        return f"{yyyymm[:4]}-{yyyymm[4:]}"
+    return str(yyyymm or "")
+
+
+def render_trend_answer(
+    *,
+    rows: List[Dict[str, Any]],
+    metric: str,
+    unit: str,
+    source_name: str,
+) -> str:
+    metric_label = {
+        "sales": "판매",
+        "net_prod": "순생산",
+        "net_ipgo": "순입고",
+    }.get(metric, metric)
+
+    if not rows:
+        return (
+            "📌 한줄 요약\n"
+            "- 추이 데이터가 없습니다.\n\n"
+            "📈 기간별 추이\n"
+            "- 조회 결과가 없습니다.\n\n"
+            "⚠️ 기준\n"
+            f"- 기준 source: {source_name}\n"
+            "- 최신 적재 기준 조회"
+        )
+
+    agg_by_period: Dict[str, float] = {}
+    for row in rows:
+        period = str(row.get("PERIOD") or row.get("period") or row.get("YEARMONTH") or row.get("yearmonth") or "")
+        value = row.get("VALUE") if "VALUE" in row else row.get("value")
+        try:
+            fval = float(value or 0.0)
+        except Exception:
+            fval = 0.0
+        if not period:
+            continue
+        agg_by_period[period] = agg_by_period.get(period, 0.0) + fval
+
+    ordered = sorted(agg_by_period.items(), key=lambda x: x[0])
+    if not ordered:
+        return (
+            "📌 한줄 요약\n"
+            "- 추이 데이터가 없습니다.\n\n"
+            "📈 기간별 추이\n"
+            "- 조회 결과가 없습니다.\n\n"
+            "⚠️ 기준\n"
+            f"- 기준 source: {source_name}\n"
+            "- 최신 적재 기준 조회"
+        )
+
+    first_v = ordered[0][1]
+    last_v = ordered[-1][1]
+    if last_v > first_v:
+        pattern = "상승"
+    elif last_v < first_v:
+        pattern = "하락"
+    else:
+        pattern = "변동"
+
+    trend_lines = [f"- {_ym_label(p)}: {_format_number(v, f' {unit}')}" for p, v in ordered]
+    analysis = []
+    if len(ordered) >= 3:
+        deltas = [ordered[i + 1][1] - ordered[i][1] for i in range(len(ordered) - 1)]
+        pos = sum(1 for d in deltas if d > 0)
+        neg = sum(1 for d in deltas if d < 0)
+        if pos and neg:
+            analysis.append("- 중간 변동이 있어 단조 추세보다는 변동성이 있습니다.")
+        elif pos > 0:
+            analysis.append("- 기간이 진행될수록 증가하는 흐름입니다.")
+        elif neg > 0:
+            analysis.append("- 기간이 진행될수록 감소하는 흐름입니다.")
+    analysis.append("- 추가 기간 확장 시 계절성/일시 변동 구분이 쉬워집니다.")
+
+    return "\n".join(
+        [
+            "📌 한줄 요약",
+            f"- {metric_label}은 {_ym_label(ordered[0][0])}→{_ym_label(ordered[-1][0])} 기준 {pattern} 패턴입니다.",
+            "",
+            "📈 기간별 추이",
+            *trend_lines,
+            "",
+            "💡 분석",
+            *analysis,
+            "",
+            "⚠️ 기준",
+            f"- 기준 source: {source_name}",
+            "- 최신 적재 기준 조회",
+        ]
+    )
+
+
 def _top_months(rows: List[Dict[str, Any]], top_n: int = 2) -> List[str]:
     vals = []
     for r in rows:
@@ -224,6 +319,13 @@ def render_answer_rule_based(
             period_label=period_label,
             source_name=source_name,
         )
+    if intent == "metric_trend_by_period":
+        return render_trend_answer(
+            rows=primary_rows,
+            metric=metric,
+            unit=unit,
+            source_name=source_name,
+        )
     if intent == "sales_compare":
         if primary_rows and (("VERSION" in primary_rows[0]) or ("version" in primary_rows[0])):
             return render_compare_versions_answer(
@@ -259,17 +361,26 @@ def render_answer_rule_based(
         if top:
             data_lines.append(f"- 상위 버전: {', '.join(top)}")
     else:
-        total = _pick_scalar_value(primary_rows)
-        if total is None:
-            total = 0.0
-        version = str(slots.get("version") or "전체")
-        summary = f"{period.get('label') or '지정 기간'} {version} 누적 판매량은 {_format_number(total)}입니다."
-        data_lines.append(f"- 누적 판매량: {_format_number(total)}")
-        aux = by_role.get("aux")
-        if aux:
-            aux_peaks = _top_months(_get_df_rows(aux.get("df")), top_n=3)
-            if aux_peaks:
-                data_lines.append(f"- 월별 breakdown: {', '.join(aux_peaks)}")
+        if primary_rows and (("VERSION" in primary_rows[0]) or ("version" in primary_rows[0])) and (("VALUE" in primary_rows[0]) or ("value" in primary_rows[0])):
+            top = []
+            for r in primary_rows[:5]:
+                ver = str(r.get("VERSION") or r.get("version") or "-")
+                val = r.get("VALUE") if "VALUE" in r else r.get("value")
+                top.append(f"{ver} {_format_number(val, f' {unit}')}")
+            summary = f"{period_label} 기준 {metric}를 조회했습니다."
+            data_lines.append(f"- 버전별 값: {', '.join(top)}")
+        else:
+            total = _pick_scalar_value(primary_rows)
+            if total is None:
+                total = 0.0
+            version = str(slots.get("version") or "전체")
+            summary = f"{period.get('label') or '지정 기간'} {version} 누적 판매량은 {_format_number(total)}입니다."
+            data_lines.append(f"- 누적 판매량: {_format_number(total)}")
+            aux = by_role.get("aux")
+            if aux:
+                aux_peaks = _top_months(_get_df_rows(aux.get("df")), top_n=3)
+                if aux_peaks:
+                    data_lines.append(f"- 월별 breakdown: {', '.join(aux_peaks)}")
 
     if not data_lines:
         data_lines.append("- 조회 결과가 없습니다.")
@@ -313,6 +424,9 @@ def render_answer_with_llm(
     results: List[Dict[str, Any]],
     period_infer_reason: str = "",
 ) -> Optional[str]:
+    if not bool((slots or {}).get("analysis")) and intent in {"metric_compare_versions", "metric_trend_by_period"}:
+        return None
+
     payload = {
         "question": question,
         "intent": intent,
