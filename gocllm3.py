@@ -1783,7 +1783,12 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             )
             if sql_exec.get("ok"):
                 sql_used = True
-                sql_summary = summarize_sql_result(sql_exec["df"])
+                sql_summary = summarize_sql_result(
+                    sql_exec["df"],
+                    result_mode=str(sql_exec.get("result_mode") or "table"),
+                    result_field=str(sql_exec.get("result_field") or ""),
+                    empty_message=str(sql_exec.get("empty_message") or "조회 결과가 없습니다."),
+                )
                 sql_summary_text = "\n".join(sql_summary.get("bullets") or [])
                 print(f"[SQL_RESULT] summary_chars={len(sql_summary_text)}")
                 if final_intent == "data_only":

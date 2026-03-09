@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 
@@ -7,24 +7,80 @@ import pandas as pd
 def _to_scalar(v) -> str:
     if v is None:
         return "-"
+    try:
+        if pd.isna(v):
+            return "-"
+    except Exception:
+        pass
     return str(v)
 
 
 
-def summarize_sql_result(df: pd.DataFrame, *, max_rows: int = 5) -> dict:
+def _is_missing(v) -> bool:
+    if v is None:
+        return True
+    try:
+        if pd.isna(v):
+            return True
+    except Exception:
+        pass
+    if isinstance(v, str) and not v.strip():
+        return True
+    return False
+
+
+def summarize_sql_result(
+    df: pd.DataFrame,
+    *,
+    max_rows: int = 5,
+    result_mode: str = "table",
+    result_field: str = "",
+    empty_message: str = "조회 결과가 없습니다.",
+) -> dict:
     if df is None or df.empty:
         return {
-            "summary": "조회 결과가 없습니다.",
-            "bullets": ["조회 결과가 없습니다."],
+            "summary": empty_message,
+            "bullets": [empty_message],
             "rows": 0,
+        }
+
+    if (result_mode or "").lower() == "scalar":
+        field = result_field or (df.columns[0] if len(df.columns) > 0 else "")
+        if not field or field not in df.columns:
+            return {
+                "summary": empty_message,
+                "bullets": [empty_message],
+                "rows": 0,
+            }
+        value = df.iloc[0][field]
+        if _is_missing(value):
+            return {
+                "summary": empty_message,
+                "bullets": [empty_message],
+                "rows": 0,
+            }
+        return {
+            "summary": f"{field}={_to_scalar(value)}",
+            "bullets": [f"- {field}={_to_scalar(value)}"],
+            "rows": 1,
         }
 
     bullets: List[str] = []
     head = df.head(max_rows)
     cols = list(head.columns)
+    non_missing_cells = 0
     for _, row in head.iterrows():
-        pairs = [f"{c}={_to_scalar(row.get(c))}" for c in cols[:4]]
+        vals = [row.get(c) for c in cols[:4]]
+        non_missing_cells += sum(0 if _is_missing(v) else 1 for v in vals)
+        pairs = [f"{c}={_to_scalar(v)}" for c, v in zip(cols[:4], vals)]
         bullets.append("- " + ", ".join(pairs))
+
+    if non_missing_cells == 0:
+        return {
+            "summary": empty_message,
+            "bullets": [empty_message],
+            "rows": 0,
+        }
 
     summary = f"총 {len(df)}건 조회되었습니다."
     return {"summary": summary, "bullets": bullets, "rows": len(df)}
