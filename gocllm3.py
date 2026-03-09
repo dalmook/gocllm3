@@ -29,7 +29,12 @@ from apscheduler.triggers.cron import CronTrigger
 import store
 import ui
 from app.oracle_db import init_oracle_thick_mode_once, run_oracle_query_compat, startup_initialize
-from app.sql_registry import find_best_sql_registry_match
+from app.sql_registry import (
+    build_sql_intent_prompt,
+    configure_sql_intent_llm_classifier,
+    find_best_sql_registry_match,
+    get_last_sql_nlu_trace,
+)
 from app.query_intent import classify_query_intent
 from app.hybrid_router import build_route_decision, execute_sql_match
 from app.hybrid_answer import (
@@ -498,6 +503,32 @@ def llm_invoke_with_retry(llm, payload, *, attempts: int = 3, base_delay: float 
             print(f"[LLM retry] attempt={i}/{attempts} err={e} sleep={delay}s")
             time.sleep(delay)
     raise last_err  # pragma: no cover
+
+
+def classify_sql_intent_with_llm(llm, question: str, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    system_prompt = (
+        "You classify Korean sales questions into registered intents only. "
+        "Return strict JSON only with keys: intent, confidence, slots."
+    )
+    user_prompt = build_sql_intent_prompt(question, context)
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+
+    try:
+        resp = llm_invoke_with_retry(llm, messages, attempts=2, base_delay=0.8)
+        content = getattr(resp, "content", "") if resp is not None else ""
+        text = content if isinstance(content, str) else str(content)
+        m = re.search(r"\\{[\\s\\S]*\\}", text)
+        if not m:
+            return None
+        obj = json.loads(m.group(0))
+        if not isinstance(obj, dict):
+            return None
+        return obj
+    except Exception as e:
+        print(f"[SQL_NLU] llm classify failed: {e}")
+        return None
 
 # =========================
 # RAG Client
@@ -1727,7 +1758,21 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         normalized_query = normalize_query_for_search(effective_question)
         glossary_intent = is_glossary_intent(effective_question) if force_glossary_mode else False
         force_glossary = force_glossary_mode
+        configure_sql_intent_llm_classifier(
+            lambda q, ctx: classify_sql_intent_with_llm(llm, q, ctx)
+        )
         sql_match = find_best_sql_registry_match(effective_question) if force_sql_mode else None
+        sql_nlu_trace = get_last_sql_nlu_trace() if force_sql_mode else {}
+        if force_sql_mode and sql_nlu_trace:
+            print(f"[SQL_NLU] original={sql_nlu_trace.get('original_question')!r}")
+            print(f"[SQL_NLU] normalized={sql_nlu_trace.get('normalized_question')!r}")
+            print(f"[SQL_NLU] slots={sql_nlu_trace.get('final_slots') or sql_nlu_trace.get('slots')}")
+            print(f"[SQL_NLU] rule_intent={sql_nlu_trace.get('rule_intent')} final_intent={sql_nlu_trace.get('final_intent')}")
+            if sql_nlu_trace.get("llm_used"):
+                print(f"[SQL_NLU] llm_intent_result={sql_nlu_trace.get('llm_intent_result')}")
+            print(f"[SQL_NLU] selected_query_id={sql_nlu_trace.get('selected_query_id')}")
+            print(f"[SQL_NLU] period={sql_nlu_trace.get('resolved_period')}")
+            print(f"[SQL_NLU] fallback_used={sql_nlu_trace.get('fallback_used')}")
         if sql_match:
             print(f"[SQL_REGISTRY] matched={sql_match.item.id} score={sql_match.score:.2f}")
         else:
@@ -1792,7 +1837,14 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 sql_summary_text = "\n".join(sql_summary.get("bullets") or [])
                 print(f"[SQL_RESULT] summary_chars={len(sql_summary_text)}")
                 if final_intent == "data_only":
-                    answer = build_data_only_answer(sql_summary)
+                    answer = build_data_only_answer(
+                        sql_summary,
+                        context={
+                            "intent": sql_exec.get("intent"),
+                            "slots": sql_exec.get("slots") or {},
+                            "period": sql_exec.get("period") or {},
+                        },
+                    )
                     print("[HYBRID] sql_used=True rag_used=False")
                     print("[ANSWER] mode=data_only llm_used=False")
                     chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")

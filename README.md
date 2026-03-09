@@ -8,6 +8,7 @@
 - `ui.py`: Oracle SQL 템플릿, Query Registry, Adaptive Card, Dashboard HTML
 - `app/oracle_db.py`: python-oracledb Thick mode 초기화/Pool/쿼리 실행
 - `app/sql_registry.py`: 자연어 질문용 SQL registry 매칭
+- `app/sql_period.py`: 자연어 기간(올해/전분기/최근 N개월 등) 표준화 유틸
 - `app/sql_registry.yaml`: `/sql` 전용 SQL 템플릿 등록 파일
 - `app/query_intent.py`: 질문 의도 분류(`general_llm`, `data_only`, `rag_only`, `hybrid`)
 - `app/hybrid_router.py`: intent별 SQL 실행 여부/실행 래퍼
@@ -24,6 +25,19 @@
 - `data_only`: SQL 실행 후 데이터 답변
 - `rag_only`: 기존 RAG 흐름
 - `hybrid`: SQL + RAG 결합
+
+## /sql 처리 흐름 (intent + slot)
+`/sql` 모드는 등록된 SQL 템플릿만 실행하며, 내부적으로 아래 순서로 동작합니다.
+1. `normalize_question(question)`
+2. `extract_slots_rule_based(question)`:
+  metric / aggregation / period / version / dimension / compare / trend
+3. `classify_intent_rule_based(question, slots)`
+4. 모호할 때만 `classify_sql_intent_with_llm` 보조 판별(JSON only)
+5. `resolve_period(slots)`으로 `start_yyyymm/end_yyyymm` 계산
+6. `select_query_template(intent, slots)`로 YAML 템플릿 선택
+7. `build_safe_sql_params(slots)`로 바인딩 파라미터 생성
+8. `execute_registered_sql(query_id, params)`
+9. `render_answer(result, slots, intent)` (기준 조건 포함)
 
 ## 1단계 Prefix 정책 (운영 안정화)
 - SQL 조회는 `/sql ...` 입력일 때만 수행합니다.
@@ -62,6 +76,14 @@ queries:
       empty_message: "해당 조건의 판매 데이터가 없습니다."
 ```
 
+확장 필드(의도/슬롯 기반):
+- `intent`: `sales_total`, `sales_trend`, `sales_grouped`, `sales_compare`
+- `supported_slots`: 템플릿이 해석 가능한 슬롯 목록
+- `default_aggregation`: 기본 집계 방식
+- `supports_compare`: 비교형 질문 지원 여부
+- `supports_trend`: 추이형 질문 지원 여부
+- `groupable_dimensions`: 허용 차원(예: `version`, `month`)
+
 질문 예시:
 - `/sql 2월 vh 판매 몇개야`
 - `/sql 버전 vh 202602 판매량`
@@ -86,6 +108,7 @@ queries:
 ## 주요 로그 Prefix
 - `[ORACLE]`
 - `[SQL_REGISTRY]`
+- `[SQL_NLU]`
 - `[SQL_DEBUG]`
 - `[INTENT]`
 - `[SQL_EXEC]`

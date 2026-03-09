@@ -100,7 +100,22 @@ def summarize_sql_result(
 
 
 
-def build_data_only_answer(sql_summary: dict) -> str:
+def _build_condition_line(context: Optional[dict]) -> str:
+    if not isinstance(context, dict):
+        return ""
+    slots = context.get("slots") or {}
+    period = context.get("period") or {}
+    agg = str(slots.get("aggregation") or "sum")
+    version = str(slots.get("version") or "전체")
+    period_label = str(period.get("label") or period.get("start_yyyymm") or "")
+    if not period_label:
+        period_label = "기간 미지정"
+    agg_map = {"sum": "합계", "avg": "평균", "max": "최대", "min": "최소", "count": "건수"}
+    agg_label = agg_map.get(agg, agg)
+    return f"- 기준: version={version}, 기간={period_label}, 집계={agg_label}"
+
+
+def build_data_only_answer(sql_summary: dict, context: Optional[dict] = None) -> str:
     lines = [
         "📌 한줄 요약",
         f"- {sql_summary.get('summary', '조회 결과를 확인했습니다.')}",
@@ -114,10 +129,12 @@ def build_data_only_answer(sql_summary: dict) -> str:
             "",
             "💡 참고",
             "- SQL 기준 시점과 다른 시스템 반영 시점은 차이가 날 수 있습니다.",
-            "",
-            "🔗 이슈지 바로가기 👉 https://go/issueG",
         ]
     )
+    cond = _build_condition_line(context)
+    if cond:
+        lines.append(cond)
+    lines.extend(["", "🔗 이슈지 바로가기 👉 https://go/issueG"])
     return "\n".join(lines)
 
 

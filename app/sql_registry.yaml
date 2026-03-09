@@ -1,11 +1,214 @@
 queries:
+  - id: sales_total
+    intent: sales_total
+    description: "판매량 합계/기본 집계 조회"
+    keywords: ["판매", "판매량", "매출", "실적", "몇개", "얼마", "올해", "분기", "월"]
+    patterns:
+      - "(판매|판매량|매출|실적)"
+      - "(올해|작년|분기|월|최근\\s*\\d+개월)"
+    supported_slots: ["metric", "aggregation", "period_type", "period_value", "version"]
+    default_aggregation: "sum"
+    supports_compare: false
+    supports_trend: false
+    groupable_dimensions: []
+    sql: |
+      SELECT NVL(SUM(SALES_MEQ), 0) AS sales
+      FROM mst_psi_simul_report
+      WHERE 1=1
+        AND workdate = (
+          SELECT MAX(workdate)
+          FROM mst_psi_simul_report
+          WHERE P_MODULE = 'PMIX'
+            AND S_MODULE = 'SOKBO'
+            AND YEARMONTH BETWEEN :start_yyyymm AND :end_yyyymm
+            AND (:version IS NULL OR UPPER(VERSION) = UPPER(:version))
+        )
+        AND P_MODULE = 'PMIX'
+        AND S_MODULE = 'SOKBO'
+        AND YEARMONTH BETWEEN :start_yyyymm AND :end_yyyymm
+        AND (:version IS NULL OR UPPER(VERSION) = UPPER(:version))
+    params:
+      version:
+        type: string
+        required: false
+        aliases: ["버전", "VERSION", "vh", "version", "wc"]
+      start_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["시작월", "from", "start", "smon"]
+      end_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["종료월", "to", "end", "emon"]
+    result:
+      mode: scalar
+      field: sales
+      empty_message: "해당 조건의 판매 데이터가 없습니다."
+
+  - id: sales_trend
+    intent: sales_trend
+    description: "월별 판매 추이 조회"
+    keywords: ["추이", "월별", "트렌드", "판매", "판매량", "최근"]
+    patterns:
+      - "(월별|추이|트렌드)"
+      - "최근\\s*\\d+개월"
+    supported_slots: ["metric", "period_type", "period_value", "version", "dimension", "trend"]
+    default_aggregation: "sum"
+    supports_compare: false
+    supports_trend: true
+    groupable_dimensions: ["month"]
+    sql: |
+      SELECT YEARMONTH,
+             NVL(SUM(SALES_MEQ), 0) AS sales
+      FROM mst_psi_simul_report
+      WHERE 1=1
+        AND workdate = (
+          SELECT MAX(workdate)
+          FROM mst_psi_simul_report
+          WHERE P_MODULE = 'PMIX'
+            AND S_MODULE = 'SOKBO'
+            AND YEARMONTH BETWEEN :start_yyyymm AND :end_yyyymm
+            AND (:version IS NULL OR UPPER(VERSION) = UPPER(:version))
+        )
+        AND P_MODULE = 'PMIX'
+        AND S_MODULE = 'SOKBO'
+        AND YEARMONTH BETWEEN :start_yyyymm AND :end_yyyymm
+        AND (:version IS NULL OR UPPER(VERSION) = UPPER(:version))
+      GROUP BY YEARMONTH
+      ORDER BY YEARMONTH
+    params:
+      version:
+        type: string
+        required: false
+        aliases: ["버전", "VERSION", "vh", "version", "wc"]
+      start_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["시작월", "from", "start", "smon"]
+      end_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["종료월", "to", "end", "emon"]
+    result:
+      mode: table
+      empty_message: "해당 조건의 판매 추이 데이터가 없습니다."
+
+  - id: sales_grouped
+    intent: sales_grouped
+    description: "버전별 판매량 조회"
+    keywords: ["버전별", "버전", "version", "판매", "판매량", "매출"]
+    patterns:
+      - "(버전별|version별|version by)"
+      - "(버전|version).*(판매|판매량|매출)"
+    supported_slots: ["metric", "period_type", "period_value", "version", "dimension"]
+    default_aggregation: "sum"
+    supports_compare: false
+    supports_trend: false
+    groupable_dimensions: ["version"]
+    sql: |
+      SELECT VERSION,
+             NVL(SUM(SALES_MEQ), 0) AS sales
+      FROM mst_psi_simul_report
+      WHERE 1=1
+        AND workdate = (
+          SELECT MAX(workdate)
+          FROM mst_psi_simul_report
+          WHERE P_MODULE = 'PMIX'
+            AND S_MODULE = 'SOKBO'
+            AND YEARMONTH BETWEEN :start_yyyymm AND :end_yyyymm
+        )
+        AND P_MODULE = 'PMIX'
+        AND S_MODULE = 'SOKBO'
+        AND YEARMONTH BETWEEN :start_yyyymm AND :end_yyyymm
+      GROUP BY VERSION
+      ORDER BY sales DESC
+    params:
+      start_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["시작월", "from", "start", "smon"]
+      end_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["종료월", "to", "end", "emon"]
+    result:
+      mode: table
+      empty_message: "해당 조건의 버전별 판매 데이터가 없습니다."
+
+  - id: sales_compare
+    intent: sales_compare
+    description: "기간 대비 판매량 비교"
+    keywords: ["대비", "전월", "전분기", "전년", "비교", "판매", "판매량"]
+    patterns:
+      - "(전월|전분기|전년)\\s*대비"
+      - "비교"
+    supported_slots: ["metric", "period_type", "period_value", "version", "compare"]
+    default_aggregation: "sum"
+    supports_compare: true
+    supports_trend: false
+    groupable_dimensions: []
+    sql: |
+      WITH base AS (
+        SELECT YEARMONTH, SALES_MEQ
+        FROM mst_psi_simul_report
+        WHERE 1=1
+          AND workdate = (
+            SELECT MAX(workdate)
+            FROM mst_psi_simul_report
+            WHERE P_MODULE = 'PMIX'
+              AND S_MODULE = 'SOKBO'
+              AND YEARMONTH BETWEEN :compare_start_yyyymm AND :end_yyyymm
+              AND (:version IS NULL OR UPPER(VERSION) = UPPER(:version))
+          )
+          AND P_MODULE = 'PMIX'
+          AND S_MODULE = 'SOKBO'
+          AND YEARMONTH BETWEEN :compare_start_yyyymm AND :end_yyyymm
+          AND (:version IS NULL OR UPPER(VERSION) = UPPER(:version))
+      )
+      SELECT NVL(SUM(CASE WHEN YEARMONTH BETWEEN :start_yyyymm AND :end_yyyymm THEN SALES_MEQ END), 0) AS current_sales,
+             NVL(SUM(CASE WHEN YEARMONTH BETWEEN :compare_start_yyyymm AND :compare_end_yyyymm THEN SALES_MEQ END), 0) AS previous_sales,
+             NVL(SUM(CASE WHEN YEARMONTH BETWEEN :start_yyyymm AND :end_yyyymm THEN SALES_MEQ END), 0)
+             - NVL(SUM(CASE WHEN YEARMONTH BETWEEN :compare_start_yyyymm AND :compare_end_yyyymm THEN SALES_MEQ END), 0) AS diff_sales
+      FROM base
+    params:
+      version:
+        type: string
+        required: false
+        aliases: ["버전", "VERSION", "vh", "version", "wc"]
+      start_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["시작월", "from", "start", "smon"]
+      end_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["종료월", "to", "end", "emon"]
+      compare_start_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["비교시작월", "prev_start"]
+      compare_end_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["비교종료월", "prev_end"]
+    result:
+      mode: table
+      empty_message: "해당 조건의 비교 데이터가 없습니다."
+
   - id: psi_sales_by_month
-    description: "특정 월/버전 판매량 합계"
+    intent: sales_total
+    deprecated: true
+    description: "(deprecated) 특정 월/버전 판매량 합계"
     keywords: ["판매", "판매량", "매출", "psi", "버전", "월", "vh", "version"]
     patterns:
       - "\\d{1,2}월.*(판매|판매량|매출)"
       - "(version|버전|vh).*판매"
       - "(판매|판매량|매출).*(version|버전|vh)"
+    supported_slots: ["metric", "aggregation", "period_type", "period_value", "version"]
+    default_aggregation: "sum"
+    supports_compare: false
+    supports_trend: false
+    groupable_dimensions: []
     sql: |
       SELECT NVL(SUM(SALES_MEQ), 0) AS sales
       FROM mst_psi_simul_report
