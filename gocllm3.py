@@ -46,6 +46,16 @@ from app.hybrid_answer import (
     build_hybrid_fallback_answer,
 )
 from app.sql_answering import render_answer_rule_based, render_answer_with_llm
+from app.feedback import normalize_feedback_type, normalize_reason_code
+from app.search_improvement import (
+    detect_weekly_issue_query,
+    detect_topic as detect_weekly_topic,
+    compute_target_week_label,
+    build_weekly_search_query_variants,
+    rerank_weekly_issue_docs,
+    summarize_rerank_reason,
+    extract_week_tokens_from_doc,
+)
 
 from zoneinfo import ZoneInfo
 import holidays
@@ -159,6 +169,7 @@ LLM_JOB_QUEUE_MAX = max(1, int(os.getenv("LLM_JOB_QUEUE_MAX", "200")))
 LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "4")))
 LLM_PROFILE_LOG = os.getenv("LLM_PROFILE_LOG", "true").lower() == "true"
 ISSUE_SUMMARY_SPEED_MODE = os.getenv("ISSUE_SUMMARY_SPEED_MODE", "false").lower() == "true"
+ENABLE_FEEDBACK_CARD = os.getenv("ENABLE_FEEDBACK_CARD", "true").lower() == "true"
 LLM_ALLOWED_USERS_SQL = os.getenv(
     "LLM_ALLOWED_USERS_SQL",
     "SELECT SSO_ID FROM SCM_WP.T_T_FOR_MASTER A WHERE 1=1 and a.dept_name in ('공급망운영그룹(메모리)','SCM그룹(메모리)','운영전략그룹(메모리)','Global운영팀(메모리)') and A.DEPT_NAME LIKE '%메모리%' and a.POSITION_CODE is not null AND A.SSO_ID NOT IN ('SCM.RPA','SCM 봇','메모리STO2','메모리 STO','dalbong.chatbot01', 'dalbongbot01', 'dalbong.bot01', 'command.center', 'thatcoolguy')"
@@ -221,6 +232,13 @@ def _limit_utf8mb4_bytes(s: str, max_bytes: int = 128) -> str:
         except UnicodeDecodeError:
             cut -= 1
     return ""
+
+
+def _answer_preview(text: str, max_len: int = 280) -> str:
+    value = (text or "").replace("\n", " ").strip()
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 3] + "..."
 
 # =========================
 # 1) AES Cipher (Knox key 기반)
@@ -1747,6 +1765,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
     force_sql_mode = force_mode == "sql"
     force_glossary_mode = force_mode == "glossary"
     sender_knox = task.get("sender_knox") or ""
+    sender_name = task.get("sender_name") or ""
+    request_id = str(task.get("request_id") or "")
     stats = {
         "rag_calls": 0,
         "llm_calls": 0,
@@ -1758,6 +1778,27 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         "rewrite_used_memory": False,
     }
     perf = {"t0": time.perf_counter()}
+    answer = ""
+    success_flag = 0
+    effective_question = question
+    normalized_query = ""
+    final_intent = ""
+    sql_used = False
+    sql_registry_id = ""
+    rag_selected_domain = "none"
+    selected_docs: List[Dict[str, Any]] = []
+    weekly_debug: Dict[str, Any] = {}
+    search_queries: List[str] = []
+
+    def _send_answer_with_feedback_card(answer_text: str):
+        nonlocal success_flag
+        chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer_text)}")
+        success_flag = 1
+        if ENABLE_FEEDBACK_CARD and request_id:
+            try:
+                chatBot.send_adaptive_card(chatroom_id, ui.build_feedback_card(request_id))
+            except Exception as feedback_err:
+                print(f"[FEEDBACK] feedback card send failed request_id={request_id} err={feedback_err}")
 
     try:
         user_id = sender_knox if sender_knox else "bot"
@@ -1801,6 +1842,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             print(f"[SQL_NLU] period_inferred={sql_nlu_trace.get('period_inferred')} reason={sql_nlu_trace.get('period_infer_reason')}")
             print(f"[SQL_NLU] fallback_used={sql_nlu_trace.get('fallback_used')}")
         if sql_match:
+            sql_registry_id = str(sql_match.item.id)
             print(f"[SQL_REGISTRY] matched={sql_match.item.id} score={sql_match.score:.2f}")
         else:
             print("[SQL_REGISTRY] matched=None")
@@ -1834,7 +1876,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 "- 현재 /sql은 등록된 SQL registry 항목만 실행합니다.\n"
                 "- 예: /sql 2월 버전 vh 판매 몇개야"
             )
-            chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
+            _send_answer_with_feedback_card(answer)
             save_conversation_memory(
                 scope_id=scope_id,
                 room_id=str(chatroom_id),
@@ -1915,7 +1957,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                             "💡 참고\n"
                             f"- 오류: {primary_error}"
                         )
-                    chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
+                    _send_answer_with_feedback_card(answer)
                     save_conversation_memory(
                         scope_id=scope_id,
                         room_id=str(chatroom_id),
@@ -1957,7 +1999,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 
                     print("[HYBRID] sql_used=True rag_used=False")
                     print("[ANSWER] mode=data_only llm_used=False")
-                    chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
+                    _send_answer_with_feedback_card(answer)
                     save_conversation_memory(
                         scope_id=scope_id,
                         room_id=str(chatroom_id),
@@ -2007,7 +2049,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             stats["fallback_reason"] = "prefer_general"
             answer = "📋 문서 기반 답변 미적용\n- 일반 지식/실시간 성격의 질문으로 판단했습니다.\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
             print("[ANSWER] mode=general_llm llm_used=True")
-            chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
+            _send_answer_with_feedback_card(answer)
             save_conversation_memory(
                 scope_id=scope_id,
                 room_id=str(chatroom_id),
@@ -2026,6 +2068,25 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 
         t_rewrite = time.perf_counter()
         search_queries = build_search_queries(effective_question, llm, memory_text=memory_text, use_memory_for_rewrite=use_memory_for_rewrite)
+        weekly_issue_query = detect_weekly_issue_query(effective_question)
+        weekly_topic = detect_weekly_topic(effective_question)
+        week_label = ""
+        if weekly_issue_query:
+            week_label = compute_target_week_label(datetime.now(ZoneInfo("Asia/Seoul")), effective_question)
+            weekly_queries = build_weekly_search_query_variants(effective_question, week_label, weekly_topic)
+            for wq in weekly_queries:
+                sq = sanitize_query(normalize_query_for_search(wq))
+                if sq and sq not in search_queries:
+                    search_queries.append(sq)
+            search_queries = search_queries[: max(MAX_RAG_QUERIES, 4)]
+            print(f"[WEEKLY_RAG] target_week={week_label} topic={weekly_topic or 'none'}")
+        weekly_debug = {
+            "weekly_issue_query": weekly_issue_query,
+            "detected_topic": weekly_topic,
+            "week_token": week_label,
+            "search_queries": search_queries[:8],
+            "extracted_period_label": (time_range or {}).get("label") if time_range else "",
+        }
         perf["rewrite_ms"] = (time.perf_counter() - t_rewrite) * 1000
         print(f"[RAG] search queries: {search_queries}")
         strong_mail_intent = has_strong_mail_intent(effective_question)
@@ -2096,6 +2157,46 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         t_rerank = time.perf_counter()
         reranked_mail_docs = rerank_rag_documents(all_mail_docs, prefer_recent=prefer_recent_docs)[:RAG_NUM_RESULT_DOC]
         reranked_glossary_docs = rerank_rag_documents(all_glossary_docs, prefer_recent=prefer_recent_docs)[:RAG_NUM_RESULT_DOC]
+        if weekly_debug.get("weekly_issue_query"):
+            reranked_mail_docs = rerank_weekly_issue_docs(
+                effective_question,
+                reranked_mail_docs,
+                str(weekly_debug.get("week_token") or ""),
+                str(weekly_debug.get("detected_topic") or ""),
+            )
+            target_week = str(weekly_debug.get("week_token") or "")
+            exact_week_docs = 0
+            for doc in reranked_mail_docs:
+                if target_week and (doc.get("_weekly_exact_week_match") or target_week in extract_week_tokens_from_doc(doc)):
+                    exact_week_docs += 1
+            recent_fallback_used = False
+            if target_week and exact_week_docs == 0:
+                target_num = int(target_week.replace("W", ""))
+                fallback_docs = []
+                for doc in reranked_mail_docs:
+                    tokens = extract_week_tokens_from_doc(doc)
+                    if not tokens:
+                        continue
+                    for token in tokens:
+                        try:
+                            token_num = int(token.replace("W", ""))
+                        except Exception:
+                            continue
+                        if abs(token_num - target_num) <= 2:
+                            fallback_docs.append(doc)
+                            break
+                if fallback_docs:
+                    reranked_mail_docs = fallback_docs + [d for d in reranked_mail_docs if d not in fallback_docs]
+                    recent_fallback_used = True
+            weekly_debug["exact_week_match_count"] = exact_week_docs
+            weekly_debug["recent_fallback_used"] = recent_fallback_used
+            weekly_debug["rerank_reason_summary"] = [
+                summarize_rerank_reason(d) for d in reranked_mail_docs[:3]
+            ]
+            print(
+                f"[WEEKLY_RAG] target_week={target_week or 'none'} "
+                f"exact_week_docs={exact_week_docs} fallback_recent_docs={1 if recent_fallback_used else 0}"
+            )
         perf["rerank_ms"] = (time.perf_counter() - t_rerank) * 1000
         mail_docs = reranked_mail_docs[:RAG_CONTEXT_DOCS]
         glossary_docs = reranked_glossary_docs[:max(RAG_CONTEXT_DOCS, GLOSSARY_TOPK_MATCH)]
@@ -2158,6 +2259,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             f"[RAG Domain Selection] selected_rag_domain={selected_rag_domain}, "
             f"glossary_intent={glossary_intent}, force_glossary={force_glossary}, mail_match={mail_match}, glossary_match={glossary_match}"
         )
+        rag_selected_domain = selected_rag_domain
 
         if rag_context and rag_relevant:
             from langchain_core.messages import SystemMessage, HumanMessage
@@ -2291,7 +2393,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         )
         print(f"[HYBRID] sql_used={sql_used} rag_used={stats['used_rag']}")
         print(f"[ANSWER] mode={final_intent} llm_used={stats['llm_calls'] > 0}")
-        chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
+        _send_answer_with_feedback_card(answer)
         save_conversation_memory(
             scope_id=scope_id,
             room_id=str(chatroom_id),
@@ -2334,6 +2436,56 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as send_err:
             print("[send error message failed]", send_err)
         return stats
+    finally:
+        try:
+            latency_ms = int((time.perf_counter() - perf.get("t0", time.perf_counter())) * 1000)
+            top_doc = selected_docs[0] if selected_docs else {}
+            debug_json = {
+                "search_queries": search_queries[:8],
+                "weekly_issue_query": bool(weekly_debug.get("weekly_issue_query")),
+                "extracted_period_label": weekly_debug.get("extracted_period_label") or "",
+                "detected_topic": weekly_debug.get("detected_topic") or "",
+                "week_token": weekly_debug.get("week_token") or "",
+                "exact_week_match_count": int(weekly_debug.get("exact_week_match_count") or 0),
+                "recent_fallback_used": bool(weekly_debug.get("recent_fallback_used")),
+                "rerank_reason_summary": weekly_debug.get("rerank_reason_summary") or [],
+            }
+            if request_id:
+                store.log_query_event(
+                    request_id=request_id,
+                    sender_knox=sender_knox,
+                    sender_name=sender_name,
+                    chatroom_id=str(chatroom_id),
+                    chat_type=chat_type,
+                    raw_question=question,
+                    effective_question=effective_question,
+                    normalized_query=normalized_query,
+                    detected_intent=final_intent,
+                    sql_registry_id=sql_registry_id,
+                    sql_used=int(bool(sql_used)),
+                    rag_used=int(bool(stats.get("used_rag"))),
+                    rag_selected_domain=rag_selected_domain,
+                    rag_top_doc_title=str(top_doc.get("title") or top_doc.get("_source", {}).get("title") or ""),
+                    rag_top_doc_url=str(top_doc.get("confluence_mail_page_url") or top_doc.get("url") or ""),
+                    rag_top_doc_score=float(
+                        top_doc.get("_weekly_score")
+                        or top_doc.get("_combined_score")
+                        or top_doc.get("_score")
+                        or 0.0
+                    ),
+                    rag_doc_count=len(selected_docs),
+                    fallback_reason=str(stats.get("fallback_reason") or ""),
+                    answer_preview=_answer_preview(answer),
+                    latency_ms=latency_ms,
+                    success_flag=int(bool(success_flag)),
+                    debug_json=debug_json,
+                )
+                print(
+                    f"[QUERY_LOG] request_id={request_id} intent={final_intent or 'unknown'} "
+                    f"rag_used={bool(stats.get('used_rag'))} sql_used={bool(sql_used)} success={bool(success_flag)}"
+                )
+        except Exception as log_err:
+            print(f"[QUERY_LOG] log failed request_id={request_id} err={log_err}")
 
 
 def process_llm_chat_background(task: Dict[str, Any]) -> Dict[str, Any]:
@@ -3388,6 +3540,74 @@ async def post_message(request: Request):
         elif action == "QUICK_LINKS":
             ui_room = route_ui_room(chatroom_id, info, sender_name)  # ✅ GROUP이면 DM, SINGLE이면 그대로
             chatBot.send_adaptive_card(ui_room, ui.build_quick_links_card(QUICK_LINK_ALIASES))
+            return {"ok": True}
+
+        elif action == "FEEDBACK_LIKE":
+            request_id = str(payload.get("request_id") or "").strip()
+            if not request_id:
+                chatBot.send_text(chatroom_id, "요청 ID가 없어 피드백을 저장하지 못했습니다.")
+                return {"ok": True}
+            qlog = store.get_query_log(request_id) or {}
+            store.add_query_feedback(
+                request_id=request_id,
+                chatroom_id=str(chatroom_id),
+                sender_knox=sender_knox,
+                feedback_type=normalize_feedback_type("like"),
+                reason_code="",
+                memo="",
+                detected_intent=str(qlog.get("detected_intent") or ""),
+                sql_registry_id=str(qlog.get("sql_registry_id") or ""),
+                rag_top_doc_title=str(qlog.get("rag_top_doc_title") or ""),
+                rag_top_doc_score=float(qlog.get("rag_top_doc_score") or 0.0),
+            )
+            print(f"[FEEDBACK] request_id={request_id} type=like")
+            chatBot.send_text(chatroom_id, "피드백 감사합니다. 👍")
+            return {"ok": True}
+
+        elif action == "FEEDBACK_DISLIKE":
+            request_id = str(payload.get("request_id") or "").strip()
+            if not request_id:
+                chatBot.send_text(chatroom_id, "요청 ID가 없어 피드백을 저장하지 못했습니다.")
+                return {"ok": True}
+            qlog = store.get_query_log(request_id) or {}
+            store.add_query_feedback(
+                request_id=request_id,
+                chatroom_id=str(chatroom_id),
+                sender_knox=sender_knox,
+                feedback_type=normalize_feedback_type("dislike"),
+                reason_code="",
+                memo="",
+                detected_intent=str(qlog.get("detected_intent") or ""),
+                sql_registry_id=str(qlog.get("sql_registry_id") or ""),
+                rag_top_doc_title=str(qlog.get("rag_top_doc_title") or ""),
+                rag_top_doc_score=float(qlog.get("rag_top_doc_score") or 0.0),
+            )
+            print(f"[FEEDBACK] request_id={request_id} type=dislike reason=")
+            chatBot.send_adaptive_card(chatroom_id, ui.build_feedback_reason_card(request_id))
+            return {"ok": True}
+
+        elif action == "FEEDBACK_REASON_SUBMIT":
+            request_id = str(payload.get("request_id") or "").strip()
+            if not request_id:
+                chatBot.send_text(chatroom_id, "요청 ID가 없어 피드백을 저장하지 못했습니다.")
+                return {"ok": True}
+            reason_code = normalize_reason_code(str(payload.get("reason_code") or ""))
+            memo = (payload.get("memo") or "").strip()
+            qlog = store.get_query_log(request_id) or {}
+            store.add_query_feedback(
+                request_id=request_id,
+                chatroom_id=str(chatroom_id),
+                sender_knox=sender_knox,
+                feedback_type=normalize_feedback_type("dislike"),
+                reason_code=reason_code,
+                memo=memo,
+                detected_intent=str(qlog.get("detected_intent") or ""),
+                sql_registry_id=str(qlog.get("sql_registry_id") or ""),
+                rag_top_doc_title=str(qlog.get("rag_top_doc_title") or ""),
+                rag_top_doc_score=float(qlog.get("rag_top_doc_score") or 0.0),
+            )
+            print(f"[FEEDBACK] request_id={request_id} type=dislike reason={reason_code}")
+            chatBot.send_text(chatroom_id, "아쉬운 점 반영을 위해 기록했습니다. 감사합니다.")
             return {"ok": True}
         
         # ---------- LLM Chatbot ----------

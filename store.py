@@ -1,8 +1,9 @@
 # store.py
 import os
 import sqlite3
+import json
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 HISTORY_PAGE_SIZE = 5
 REMIND_DAYS = {7, 3, 0}
@@ -92,6 +93,89 @@ def init_db():
         user_id    TEXT PRIMARY KEY,
         room_id    TEXT NOT NULL,
         created_at TEXT
+    )
+    """)
+
+    # query_logs
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS query_logs (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at           TEXT,
+        sender_knox          TEXT,
+        sender_name          TEXT,
+        chatroom_id          TEXT,
+        chat_type            TEXT,
+        request_id           TEXT UNIQUE,
+        raw_question         TEXT,
+        effective_question   TEXT,
+        normalized_query     TEXT,
+        detected_intent      TEXT,
+        sql_registry_id      TEXT,
+        sql_used             INTEGER DEFAULT 0,
+        rag_used             INTEGER DEFAULT 0,
+        rag_selected_domain  TEXT,
+        rag_top_doc_title    TEXT,
+        rag_top_doc_url      TEXT,
+        rag_top_doc_score    REAL,
+        rag_doc_count        INTEGER DEFAULT 0,
+        fallback_reason      TEXT,
+        answer_preview       TEXT,
+        latency_ms           INTEGER DEFAULT 0,
+        success_flag         INTEGER DEFAULT 0,
+        debug_json           TEXT
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_created_at ON query_logs(created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_query_logs_request_id ON query_logs(request_id)")
+
+    # query_feedback
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS query_feedback (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at         TEXT,
+        request_id         TEXT,
+        chatroom_id        TEXT,
+        sender_knox        TEXT,
+        feedback_type      TEXT,
+        reason_code        TEXT,
+        memo               TEXT,
+        detected_intent    TEXT,
+        sql_registry_id    TEXT,
+        rag_top_doc_title  TEXT,
+        rag_top_doc_score  REAL
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_query_feedback_request_id ON query_feedback(request_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_query_feedback_created_at ON query_feedback(created_at)")
+
+    # improvement_candidates
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS improvement_candidates (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at        TEXT,
+        candidate_type    TEXT,
+        source_pattern    TEXT,
+        suggested_change  TEXT,
+        evidence_count    INTEGER DEFAULT 0,
+        confidence_score  REAL DEFAULT 0,
+        status            TEXT DEFAULT 'new',
+        notes             TEXT
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_impr_candidates_status ON improvement_candidates(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_impr_candidates_created_at ON improvement_candidates(created_at)")
+
+    # improvement_runs
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS improvement_runs (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at         TEXT,
+        period_days        INTEGER DEFAULT 7,
+        total_logs         INTEGER DEFAULT 0,
+        total_feedback     INTEGER DEFAULT 0,
+        generated_count    INTEGER DEFAULT 0,
+        report_json_path   TEXT,
+        report_md_path     TEXT
     )
     """)
 
@@ -550,3 +634,335 @@ def build_week_series(created_rows: List[dict], closed_rows: List[dict], weeks: 
 def scope_room_id(chatroom_id: int, payload: dict) -> str:
     rid = (payload.get("room_id") or "").strip()
     return rid if rid else str(chatroom_id)
+
+
+def _now_text() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _trim_preview(text: str, max_len: int = 300) -> str:
+    value = (text or "").strip()
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 3] + "..."
+
+
+def _json_text(data: Dict[str, Any]) -> str:
+    if not data:
+        return "{}"
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def log_query_event(
+    *,
+    request_id: str,
+    sender_knox: str = "",
+    sender_name: str = "",
+    chatroom_id: str = "",
+    chat_type: str = "",
+    raw_question: str = "",
+    effective_question: str = "",
+    normalized_query: str = "",
+    detected_intent: str = "",
+    sql_registry_id: str = "",
+    sql_used: int = 0,
+    rag_used: int = 0,
+    rag_selected_domain: str = "",
+    rag_top_doc_title: str = "",
+    rag_top_doc_url: str = "",
+    rag_top_doc_score: float = 0.0,
+    rag_doc_count: int = 0,
+    fallback_reason: str = "",
+    answer_preview: str = "",
+    latency_ms: int = 0,
+    success_flag: int = 0,
+    debug_json: Optional[Dict[str, Any]] = None,
+) -> int:
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO query_logs(
+            created_at,sender_knox,sender_name,chatroom_id,chat_type,request_id,
+            raw_question,effective_question,normalized_query,detected_intent,sql_registry_id,
+            sql_used,rag_used,rag_selected_domain,rag_top_doc_title,rag_top_doc_url,rag_top_doc_score,rag_doc_count,
+            fallback_reason,answer_preview,latency_ms,success_flag,debug_json
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(request_id) DO UPDATE SET
+            sender_knox=excluded.sender_knox,
+            sender_name=excluded.sender_name,
+            chatroom_id=excluded.chatroom_id,
+            chat_type=excluded.chat_type,
+            raw_question=excluded.raw_question,
+            effective_question=excluded.effective_question,
+            normalized_query=excluded.normalized_query,
+            detected_intent=excluded.detected_intent,
+            sql_registry_id=excluded.sql_registry_id,
+            sql_used=excluded.sql_used,
+            rag_used=excluded.rag_used,
+            rag_selected_domain=excluded.rag_selected_domain,
+            rag_top_doc_title=excluded.rag_top_doc_title,
+            rag_top_doc_url=excluded.rag_top_doc_url,
+            rag_top_doc_score=excluded.rag_top_doc_score,
+            rag_doc_count=excluded.rag_doc_count,
+            fallback_reason=excluded.fallback_reason,
+            answer_preview=excluded.answer_preview,
+            latency_ms=excluded.latency_ms,
+            success_flag=excluded.success_flag,
+            debug_json=excluded.debug_json
+        """,
+        (
+            _now_text(),
+            sender_knox,
+            sender_name,
+            str(chatroom_id),
+            chat_type,
+            request_id,
+            raw_question,
+            effective_question,
+            normalized_query,
+            detected_intent,
+            sql_registry_id,
+            int(bool(sql_used)),
+            int(bool(rag_used)),
+            rag_selected_domain,
+            rag_top_doc_title,
+            rag_top_doc_url,
+            float(rag_top_doc_score or 0.0),
+            int(rag_doc_count or 0),
+            fallback_reason,
+            _trim_preview(answer_preview, max_len=500),
+            int(latency_ms or 0),
+            int(bool(success_flag)),
+            _json_text(debug_json or {}),
+        ),
+    )
+    row_id = int(cur.lastrowid or 0)
+    con.commit()
+    con.close()
+    return row_id
+
+
+def get_query_log(request_id: str) -> Optional[dict]:
+    con = db_connect()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    cur.execute("SELECT * FROM query_logs WHERE request_id=? LIMIT 1", (request_id,))
+    row = cur.fetchone()
+    con.close()
+    return dict(row) if row else None
+
+
+def list_query_logs_recent(days: int = 7, limit: int = 1000) -> List[dict]:
+    con = db_connect()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    cur.execute(
+        """
+        SELECT * FROM query_logs
+        WHERE datetime(created_at) >= datetime('now', ?)
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (f"-{int(days)} day", int(limit)),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    con.close()
+    return rows
+
+
+def add_query_feedback(
+    *,
+    request_id: str,
+    chatroom_id: str = "",
+    sender_knox: str = "",
+    feedback_type: str = "like",
+    reason_code: str = "",
+    memo: str = "",
+    detected_intent: str = "",
+    sql_registry_id: str = "",
+    rag_top_doc_title: str = "",
+    rag_top_doc_score: float = 0.0,
+) -> int:
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO query_feedback(
+            created_at,request_id,chatroom_id,sender_knox,feedback_type,reason_code,memo,
+            detected_intent,sql_registry_id,rag_top_doc_title,rag_top_doc_score
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            _now_text(),
+            request_id,
+            str(chatroom_id),
+            sender_knox,
+            feedback_type,
+            reason_code,
+            _trim_preview(memo, max_len=500),
+            detected_intent,
+            sql_registry_id,
+            rag_top_doc_title,
+            float(rag_top_doc_score or 0.0),
+        ),
+    )
+    row_id = int(cur.lastrowid or 0)
+    con.commit()
+    con.close()
+    return row_id
+
+
+def list_feedback_summary(days: int = 7, limit: int = 100) -> List[dict]:
+    con = db_connect()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    cur.execute(
+        """
+        SELECT
+            request_id,
+            SUM(CASE WHEN feedback_type='like' THEN 1 ELSE 0 END) AS like_count,
+            SUM(CASE WHEN feedback_type='dislike' THEN 1 ELSE 0 END) AS dislike_count,
+            MAX(created_at) AS latest_feedback_at
+        FROM query_feedback
+        WHERE datetime(created_at) >= datetime('now', ?)
+        GROUP BY request_id
+        ORDER BY dislike_count DESC, like_count DESC, latest_feedback_at DESC
+        LIMIT ?
+        """,
+        (f"-{int(days)} day", int(limit)),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    con.close()
+    return rows
+
+
+def list_feedback_recent(days: int = 7, limit: int = 1000) -> List[dict]:
+    con = db_connect()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    cur.execute(
+        """
+        SELECT * FROM query_feedback
+        WHERE datetime(created_at) >= datetime('now', ?)
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (f"-{int(days)} day", int(limit)),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    con.close()
+    return rows
+
+
+def add_improvement_candidate(
+    *,
+    candidate_type: str,
+    source_pattern: str,
+    suggested_change: str,
+    evidence_count: int = 0,
+    confidence_score: float = 0.0,
+    status: str = "new",
+    notes: str = "",
+) -> int:
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO improvement_candidates(
+            created_at,candidate_type,source_pattern,suggested_change,evidence_count,confidence_score,status,notes
+        )
+        VALUES(?,?,?,?,?,?,?,?)
+        """,
+        (
+            _now_text(),
+            candidate_type,
+            source_pattern,
+            suggested_change,
+            int(evidence_count or 0),
+            float(confidence_score or 0.0),
+            status,
+            notes,
+        ),
+    )
+    row_id = int(cur.lastrowid or 0)
+    con.commit()
+    con.close()
+    return row_id
+
+
+def list_improvement_candidates(status: Optional[str] = None, limit: int = 200) -> List[dict]:
+    con = db_connect()
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    if status:
+        cur.execute(
+            """
+            SELECT * FROM improvement_candidates
+            WHERE status=?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (status, int(limit)),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT * FROM improvement_candidates
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+    rows = [dict(r) for r in cur.fetchall()]
+    con.close()
+    return rows
+
+
+def update_improvement_candidate_status(candidate_id: int, status: str, notes: str = "") -> bool:
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute(
+        "UPDATE improvement_candidates SET status=?, notes=? WHERE id=?",
+        (status, notes, int(candidate_id)),
+    )
+    con.commit()
+    changed = cur.rowcount > 0
+    con.close()
+    return changed
+
+
+def add_improvement_run(
+    *,
+    period_days: int,
+    total_logs: int,
+    total_feedback: int,
+    generated_count: int,
+    report_json_path: str = "",
+    report_md_path: str = "",
+) -> int:
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute(
+        """
+        INSERT INTO improvement_runs(
+            created_at,period_days,total_logs,total_feedback,generated_count,report_json_path,report_md_path
+        )
+        VALUES(?,?,?,?,?,?,?)
+        """,
+        (
+            _now_text(),
+            int(period_days),
+            int(total_logs),
+            int(total_feedback),
+            int(generated_count),
+            report_json_path,
+            report_md_path,
+        ),
+    )
+    row_id = int(cur.lastrowid or 0)
+    con.commit()
+    con.close()
+    return row_id

@@ -1823,3 +1823,55 @@ def build_quick_links_card(quick_links: list[tuple[list[str], str, str]]) -> dic
             {"type":"Action.Submit","title":"🏠 홈","data":{"action":"HOME"}},
         ],
     }          
+
+
+def build_feedback_actions(request_id: str) -> List[dict]:
+    return [
+        {"type": "Action.Submit", "title": "👍 도움됨", "data": {"action": "FEEDBACK_LIKE", "request_id": request_id}},
+        {"type": "Action.Submit", "title": "👎 아쉬움", "data": {"action": "FEEDBACK_DISLIKE", "request_id": request_id}},
+    ]
+
+
+def build_feedback_card(request_id: str) -> dict:
+    return {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.3",
+        "body": [
+            {"type": "TextBlock", "text": "답변이 도움이 되었나요?", "weight": "Bolder", "wrap": True},
+            {"type": "TextBlock", "text": f"요청 ID: {request_id}", "isSubtle": True, "spacing": "Small", "wrap": True},
+        ],
+        "actions": build_feedback_actions(request_id),
+    }
+
+
+def build_feedback_reason_card(request_id: str) -> dict:
+    reasons = [
+        ("최신 문서 아님", "stale_doc"),
+        ("엉뚱한 문서 찾음", "wrong_doc"),
+        ("SQL 조회 필요", "should_use_sql"),
+        ("답이 모호함", "vague_answer"),
+        ("기타", "other"),
+    ]
+    return {
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.3",
+        "body": [
+            {"type": "TextBlock", "text": "아쉬웠던 이유를 선택해 주세요.", "weight": "Bolder", "wrap": True},
+            {
+                "type": "Input.Text",
+                "id": "memo",
+                "isMultiline": True,
+                "placeholder": "추가 메모(선택)",
+            },
+        ],
+        "actions": [
+            {
+                "type": "Action.Submit",
+                "title": title,
+                "data": {"action": "FEEDBACK_REASON_SUBMIT", "request_id": request_id, "reason_code": reason_code},
+            }
+            for title, reason_code in reasons
+        ],
+    }
