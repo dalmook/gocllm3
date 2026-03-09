@@ -3,6 +3,18 @@ from typing import List, Optional
 import pandas as pd
 
 
+def _resolve_field_name(df: pd.DataFrame, field: str) -> str:
+    if not field:
+        return ""
+    if field in df.columns:
+        return field
+    wanted = str(field).strip().lower()
+    for col in df.columns:
+        if str(col).strip().lower() == wanted:
+            return str(col)
+    return ""
+
+
 
 def _to_scalar(v) -> str:
     if v is None:
@@ -45,8 +57,9 @@ def summarize_sql_result(
         }
 
     if (result_mode or "").lower() == "scalar":
-        field = result_field or (df.columns[0] if len(df.columns) > 0 else "")
-        if not field or field not in df.columns:
+        raw_field = result_field or (df.columns[0] if len(df.columns) > 0 else "")
+        field = _resolve_field_name(df, raw_field)
+        if not field:
             return {
                 "summary": empty_message,
                 "bullets": [empty_message],
