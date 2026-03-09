@@ -8,6 +8,7 @@
 - `ui.py`: Oracle SQL 템플릿, Query Registry, Adaptive Card, Dashboard HTML
 - `app/oracle_db.py`: python-oracledb Thick mode 초기화/Pool/쿼리 실행
 - `app/sql_registry.py`: 자연어 질문용 SQL registry 매칭
+- `app/sql_registry.yaml`: `/sql` 전용 SQL 템플릿 등록 파일
 - `app/query_intent.py`: 질문 의도 분류(`general_llm`, `data_only`, `rag_only`, `hybrid`)
 - `app/hybrid_router.py`: intent별 SQL 실행 여부/실행 래퍼
 - `app/hybrid_answer.py`: data/hybrid 답변 포맷 생성
@@ -32,6 +33,39 @@
 예시:
 - `/sql 2월 버전 vh 판매 몇개야`
 - `/용어 hbm`
+
+## SQL 등록 방법 (YAML)
+`/sql` 실행 대상은 `app/sql_registry.yaml`의 `queries`에 추가합니다.
+
+필드 예시:
+```yaml
+queries:
+  - id: psi_sales_by_month
+    description: "특정 월/버전 판매량 합계"
+    sql: |
+      SELECT SUM(SALES_MEQ) AS sales
+      FROM mst_psi_simul_report
+      WHERE VERSION = :version
+        AND YEARMONTH = :yearmonth
+    params:
+      version:
+        type: string
+        required: true
+        aliases: ["버전", "VERSION", "vh", "version"]
+      yearmonth:
+        type: yyyymm
+        required: true
+        aliases: ["월", "년월", "YEARMONTH", "month"]
+    result:
+      mode: scalar
+      field: sales
+      empty_message: "해당 조건의 판매 데이터가 없습니다."
+```
+
+질문 예시:
+- `/sql 2월 vh 판매 몇개야`
+- `/sql 버전 vh 202602 판매량`
+- `/sql version=VH yearmonth=202602 판매량`
 
 ## Oracle 연결 정책
 - 드라이버: `python-oracledb` (Thin 금지)

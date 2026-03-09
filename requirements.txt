@@ -8,3 +8,4 @@ holidays
 langchain-openai
 oracledb
 python-dateutil
+PyYAML

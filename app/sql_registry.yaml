@@ -1,0 +1,25 @@
+queries:
+  - id: psi_sales_by_month
+    description: "특정 월/버전 판매량 합계"
+    keywords: ["판매", "psi", "버전", "월", "vh"]
+    patterns:
+      - "\\d{1,2}월.*판매"
+      - "(version|버전|vh).*판매"
+    sql: |
+      SELECT SUM(SALES_MEQ) AS sales
+      FROM mst_psi_simul_report
+      WHERE VERSION = :version
+        AND YEARMONTH = :yearmonth
+    params:
+      version:
+        type: string
+        required: true
+        aliases: ["버전", "VERSION", "vh", "version"]
+      yearmonth:
+        type: yyyymm
+        required: true
+        aliases: ["월", "년월", "YEARMONTH", "month"]
+    result:
+      mode: scalar
+      field: sales
+      empty_message: "해당 조건의 판매 데이터가 없습니다."

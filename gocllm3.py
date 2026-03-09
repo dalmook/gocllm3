@@ -1774,7 +1774,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             return stats
 
         if route.use_sql and sql_match:
-            sql_exec = execute_sql_match(sql_match, question=effective_question, runners=RUNNERS, run_oracle_query=run_oracle_query)
+            sql_exec = execute_sql_match(sql_match, question=effective_question, run_oracle_query=run_oracle_query)
             sql_df = sql_exec.get("df")
             sql_rows = len(sql_df.index) if isinstance(sql_df, pd.DataFrame) else 0
             print(
@@ -1801,6 +1801,34 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                     )
                     return stats
             else:
+                if force_sql_mode:
+                    missing = sql_exec.get("missing_params") or []
+                    if missing:
+                        missing_line = ", ".join(missing)
+                        answer = (
+                            "📌 한줄 요약\n"
+                            "- /sql 실행에 필요한 필수 파라미터가 부족합니다.\n\n"
+                            "💡 참고\n"
+                            f"- 누락 파라미터: {missing_line}\n"
+                            "- 예시: /sql version=VH yearmonth=202602 판매량"
+                        )
+                    else:
+                        answer = (
+                            "📌 한줄 요약\n"
+                            "- /sql 실행 중 오류가 발생했습니다.\n\n"
+                            "💡 참고\n"
+                            f"- 오류: {sql_exec.get('error')}"
+                        )
+                    chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
+                    save_conversation_memory(
+                        scope_id=scope_id,
+                        room_id=str(chatroom_id),
+                        user_id=sender_knox,
+                        role="assistant",
+                        content=answer,
+                        chat_type=chat_type,
+                    )
+                    return stats
                 print(f"[SQL_EXEC] failed runner={sql_exec.get('runner')} error={sql_exec.get('error')}")
 
         if final_intent == "general_llm":
