@@ -96,8 +96,8 @@ TERM_JSON_PATH = os.getenv("TERM_JSON_PATH", r"F:\Workspace\output.json")
 TERM_ADMIN_ROOM_IDS = os.getenv("TERM_ADMIN_ROOM_IDS", "")  # 예
 
 # ✅ 카드 recall(회수) 기능: 기본 OFF 권장(통신 오류 시스템 메시지 유발 가능)
-ENABLE_RECALL = os.getenv("ENABLE_RECALL", "true").lower() == "true"
 
+ENABLE_RECALL = os.getenv("ENABLE_RECALL", "true").lower() == "true"
 # LLM 대화 기본 동작
 # - "off": /ask 또는 "질문:"만 LLM
 # - "single": 1:1(SINGLE)에서는 /ask 없이도 모든 일반 텍스트를 LLM
