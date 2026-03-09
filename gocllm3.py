@@ -1,4 +1,4 @@
-# pip install pycryptodomex fastapi uvicorn apscheduler requests pandas holidays langchain-openai cx_Oracle
+# pip install pycryptodomex fastapi uvicorn apscheduler requests pandas holidays langchain-openai oracledb
 import os
 import json
 import base64
@@ -16,7 +16,7 @@ from collections import defaultdict
 
 import requests
 import pandas as pd
-import cx_Oracle
+import oracledb
 import uvicorn
 import urllib3
 
@@ -28,6 +28,16 @@ from apscheduler.triggers.cron import CronTrigger
 
 import store
 import ui
+from app.oracle_db import init_oracle_thick_mode_once, run_oracle_query_compat, startup_initialize
+from app.sql_registry import find_best_sql_registry_match
+from app.query_intent import classify_query_intent
+from app.hybrid_router import build_route_decision, execute_sql_match
+from app.hybrid_answer import (
+    summarize_sql_result,
+    build_data_only_answer,
+    build_hybrid_prompt,
+    build_hybrid_fallback_answer,
+)
 
 from zoneinfo import ZoneInfo
 import holidays
@@ -1707,23 +1717,69 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         perf["memory_ms"] = (time.perf_counter() - perf["t0"]) * 1000
 
         prefer_general = should_prefer_general_llm(question)
-        if prefer_general:
+        time_range = _extract_time_range_from_question(question)
+        effective_question, ctx_state = _build_effective_question(question, scope_id=scope_id, time_range=time_range)
+        issue_summary_intent = is_issue_summary_intent(effective_question)
+
+        normalized_query = normalize_query_for_search(effective_question)
+        glossary_intent = is_glossary_intent(effective_question)
+        force_glossary = is_force_glossary_query(effective_question)
+        sql_match = find_best_sql_registry_match(effective_question)
+        if sql_match:
+            print(f"[SQL_REGISTRY] matched={sql_match.item.id} score={sql_match.score:.2f}")
+        else:
+            print("[SQL_REGISTRY] matched=None")
+        final_intent = classify_query_intent(
+            question,
+            effective_question,
+            sql_match,
+            prefer_general=prefer_general,
+            issue_summary_intent=issue_summary_intent,
+            glossary_intent=glossary_intent,
+        )
+        print(f"[INTENT] sql_match={(sql_match.item.id if sql_match else 'none')} final={final_intent}")
+        route = build_route_decision(final_intent, sql_match)
+        sql_summary = None
+        sql_summary_text = ""
+        sql_used = False
+
+        if route.use_sql and sql_match:
+            sql_exec = execute_sql_match(sql_match, question=effective_question, runners=RUNNERS, run_oracle_query=run_oracle_query)
+            sql_df = sql_exec.get("df")
+            sql_rows = len(sql_df.index) if isinstance(sql_df, pd.DataFrame) else 0
+            print(
+                f"[SQL_EXEC] runner={sql_exec.get('runner')} rows={sql_rows} "
+                f"elapsed_ms={sql_exec.get('elapsed_ms', 0)} ok={sql_exec.get('ok')}"
+            )
+            if sql_exec.get("ok"):
+                sql_used = True
+                sql_summary = summarize_sql_result(sql_exec["df"])
+                sql_summary_text = "\n".join(sql_summary.get("bullets") or [])
+                print(f"[SQL_RESULT] summary_chars={len(sql_summary_text)}")
+                if final_intent == "data_only":
+                    answer = build_data_only_answer(sql_summary)
+                    print("[HYBRID] sql_used=True rag_used=False")
+                    print("[ANSWER] mode=data_only llm_used=False")
+                    chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
+                    save_conversation_memory(
+                        scope_id=scope_id,
+                        room_id=str(chatroom_id),
+                        user_id=sender_knox,
+                        role="assistant",
+                        content=answer,
+                        chat_type=chat_type,
+                    )
+                    return stats
+            else:
+                print(f"[SQL_EXEC] failed runner={sql_exec.get('runner')} error={sql_exec.get('error')}")
+
+        if final_intent == "general_llm":
             from langchain_core.messages import SystemMessage, HumanMessage
 
             fallback_system_prompt = """
 당신은 GOC 업무 지원 챗봇입니다.
 이번 질문은 일반 지식/실시간 성격의 질문으로 판단하여 문서 검색 없이 일반 LLM 답변으로 안내합니다.
 과도한 추측은 피하고, 불확실한 내용은 단정하지 마세요.
-
-답변 형식
-📌 한줄 요약
-한 문장 요약
-
-✅ 일반 답변
-- 핵심 내용 2~5개
-
-⚠️ 참고
-- 이번 답변은 문서 기반이 아니라 일반 답변임을 짧게 안내
 """
             messages = [SystemMessage(content=fallback_system_prompt)]
             if memory_text:
@@ -1735,6 +1791,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             stats["llm_calls"] += 1
             stats["fallback_reason"] = "prefer_general"
             answer = "📋 문서 기반 답변 미적용\n- 일반 지식/실시간 성격의 질문으로 판단했습니다.\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
+            print("[ANSWER] mode=general_llm llm_used=True")
             chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
             save_conversation_memory(
                 scope_id=scope_id,
@@ -1744,32 +1801,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 content=answer,
                 chat_type=chat_type,
             )
-            try:
-                save_conversation_state(
-                    scope_id,
-                    topic=_extract_topic_from_question(question),
-                    time_label=_extract_time_label_from_question(question, _extract_time_range_from_question(question)),
-                    last_query=question,
-                )
-            except Exception as _e:
-                print(f"[CONTEXT STATE] save failed: {_e}")
-            perf["total_ms"] = (time.perf_counter() - perf["t0"]) * 1000
-            if LLM_PROFILE_LOG:
-                print(
-                    "[LLM PERF] "
-                    f"total={perf.get('total_ms', 0):.0f}ms "
-                    f"init={perf.get('llm_init_ms', 0):.0f}ms "
-                    f"memory={perf.get('memory_ms', 0):.0f}ms "
-                    f"llm={perf.get('llm_ms', 0):.0f}ms"
-                )
             return stats
 
-        time_range = _extract_time_range_from_question(question)
-        effective_question, ctx_state = _build_effective_question(question, scope_id=scope_id, time_range=time_range)
-
-        normalized_query = normalize_query_for_search(effective_question)
-        glossary_intent = is_glossary_intent(effective_question)
-        force_glossary = is_force_glossary_query(effective_question)
         print(f"[RAG] original question={question}")
         print(f"[RAG] effective question={effective_question}")
         print(f"[RAG] normalized query={normalized_query}")
@@ -1780,7 +1813,6 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         search_queries = build_search_queries(effective_question, llm, memory_text=memory_text, use_memory_for_rewrite=use_memory_for_rewrite)
         perf["rewrite_ms"] = (time.perf_counter() - t_rewrite) * 1000
         print(f"[RAG] search queries: {search_queries}")
-        issue_summary_intent = is_issue_summary_intent(effective_question)
         strong_mail_intent = has_strong_mail_intent(effective_question)
         prefer_recent_docs = bool(time_range) or should_prioritize_recent_docs(effective_question) or issue_summary_intent
         retrieve_top_k = RAG_NUM_RESULT_DOC
@@ -1916,7 +1948,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             from langchain_core.messages import SystemMessage, HumanMessage
             stats["used_rag"] = True
 
-            if issue_summary_intent and ISSUE_SUMMARY_SPEED_MODE:
+            if final_intent == "hybrid" and sql_summary:
+                system_prompt = build_hybrid_prompt(question, sql_summary_text, rag_context)
+            elif issue_summary_intent and ISSUE_SUMMARY_SPEED_MODE:
                 system_prompt = f"""
 당신은 GOC 업무 지원 챗봇입니다. 아래 [검색 문서]만 근거로 아주 간결하게 답하세요.
 
@@ -1983,6 +2017,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             messages = [SystemMessage(content=system_prompt)]
             if memory_text:
                 messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
+            if final_intent == "hybrid" and sql_summary:
+                messages.append(HumanMessage(content=f"[SQL summary]\n{sql_summary_text}"))
             messages.append(HumanMessage(content=f"[RAG context]\n{rag_context}"))
             messages.append(HumanMessage(content=question))
             t_llm = time.perf_counter()
@@ -2008,33 +2044,38 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             if issue_summary_intent and ISSUE_SUMMARY_SPEED_MODE and "https://go/issueG" not in answer:
                 answer += "\n\n🔗 이슈지 바로가기 👉 https://go/issueG"
         else:
-            from langchain_core.messages import SystemMessage, HumanMessage
-            fallback_system_prompt = """
+            if final_intent == "hybrid" and sql_summary:
+                answer = build_hybrid_fallback_answer(sql_summary, rag_found=False)
+            else:
+                from langchain_core.messages import SystemMessage, HumanMessage
+                fallback_system_prompt = """
 당신은 GOC 업무 지원 챗봇입니다.
 이번 질문은 문서 검색 결과가 없거나 관련성이 낮아 일반 LLM 답변으로 안내합니다.
 과도한 추측은 피하고, 불확실한 내용은 단정하지 마세요.
 """
-            messages = [SystemMessage(content=fallback_system_prompt)]
-            if memory_text:
-                messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
-            messages.append(HumanMessage(content=question))
-            t_llm = time.perf_counter()
-            response = llm_invoke_with_retry(llm, messages, attempts=1, base_delay=1.5)
-            perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
-            stats["llm_calls"] += 1
+                messages = [SystemMessage(content=fallback_system_prompt)]
+                if memory_text:
+                    messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
+                messages.append(HumanMessage(content=question))
+                t_llm = time.perf_counter()
+                response = llm_invoke_with_retry(llm, messages, attempts=1, base_delay=1.5)
+                perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
+                stats["llm_calls"] += 1
 
-            reason = "관련 문서를 찾지 못했습니다."
-            if skip_rag:
-                reason = f"검색 문서 유사도가 기준치({RAG_SIMILARITY_THRESHOLD})보다 낮았습니다."
-            elif (mail_docs or glossary_docs) and not rag_relevant:
-                reason = "검색 문서는 있었지만 질문과의 관련성이 낮았습니다."
-            stats["fallback_reason"] = reason
-            answer = f"📋 문서 기반 답변 미적용\n- {reason}\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
+                reason = "관련 문서를 찾지 못했습니다."
+                if skip_rag:
+                    reason = f"검색 문서 유사도가 기준치({RAG_SIMILARITY_THRESHOLD})보다 낮았습니다."
+                elif (mail_docs or glossary_docs) and not rag_relevant:
+                    reason = "검색 문서는 있었지만 질문과의 관련성이 낮았습니다."
+                stats["fallback_reason"] = reason
+                answer = f"📋 문서 기반 답변 미적용\n- {reason}\n- 아래는 일반 LLM 답변입니다.\n\n" + response.content.strip()
 
         print(
             f"[RAG Final] selected_rag_domain={selected_rag_domain} used_rag={stats['used_rag']} "
             f"fallback_reason={stats.get('fallback_reason','')}"
         )
+        print(f"[HYBRID] sql_used={sql_used} rag_used={stats['used_rag']}")
+        print(f"[ANSWER] mode={final_intent} llm_used={stats['llm_calls'] > 0}")
         chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
         save_conversation_memory(
             scope_id=scope_id,
@@ -2319,15 +2360,16 @@ def send_issue_history_card(chatroom_id: int, *, scope_room_id: str, page: int, 
 # 5) Oracle Query runner
 # =========================
 def run_oracle_query(sql: str, params: Optional[dict] = None) -> pd.DataFrame:
-    dsn = cx_Oracle.makedsn(ORACLE_HOST, ORACLE_PORT, service_name=ORACLE_SERVICE)
-    con = cx_Oracle.connect(user=ORACLE_USER, password=ORACLE_PW, dsn=dsn, encoding="UTF-8")
-    try:
-        return pd.read_sql(sql, con, params=params)
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
+    return run_oracle_query_compat(
+        sql,
+        params,
+        host=ORACLE_HOST,
+        port=ORACLE_PORT,
+        service=ORACLE_SERVICE,
+        user=ORACLE_USER,
+        password=ORACLE_PW,
+        lib_dir=r"c:\instantclient",
+    )
 
 # (추가 코드 - 추가용)  ※ run_oracle_query 아래쪽에 추가
 def _likeify2(v: str) -> str:
@@ -3038,6 +3080,18 @@ def on_startup():
     global chatBot
     store.init_db()
     init_conversation_memory_db()
+    try:
+        init_oracle_thick_mode_once(lib_dir=r"c:\instantclient")
+        startup_initialize(
+            host=ORACLE_HOST,
+            port=ORACLE_PORT,
+            service=ORACLE_SERVICE,
+            user=ORACLE_USER,
+            password=ORACLE_PW,
+            lib_dir=r"c:\instantclient",
+        )
+    except Exception as e:
+        print(f"[ORACLE] startup init failed: {e}")
     start_llm_workers()
     print(f"[startup] LLM workers started: workers={LLM_WORKERS}, max_concurrent={LLM_MAX_CONCURRENT}, queue_max={LLM_JOB_QUEUE_MAX}")
 

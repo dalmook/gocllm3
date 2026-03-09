@@ -1,0 +1,10 @@
+pycryptodomex
+fastapi
+uvicorn
+apscheduler
+requests
+pandas
+holidays
+langchain-openai
+oracledb
+python-dateutil
