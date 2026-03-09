@@ -97,6 +97,9 @@ class SQLDimensionSpec:
     aliases: List[str] = field(default_factory=list)
     supports_filter: bool = True
     supports_groupby: bool = True
+    value_mode: str = "free_text"
+    sample_values: List[str] = field(default_factory=list)
+    value_aliases: Dict[str, str] = field(default_factory=dict)
     description: str = ""
 
 
@@ -315,6 +318,13 @@ def _parse_semantic_sections(data: Dict[str, Any]) -> None:
                 aliases=aliases,
                 supports_filter=bool(spec.get("supports_filter", True)),
                 supports_groupby=bool(spec.get("supports_groupby", True)),
+                value_mode=str(spec.get("value_mode") or "free_text").strip().lower() or "free_text",
+                sample_values=[str(x).strip() for x in (spec.get("sample_values") or []) if str(x).strip()],
+                value_aliases={
+                    str(k).strip().lower(): str(v).strip()
+                    for k, v in (spec.get("value_aliases") or {}).items()
+                    if str(k).strip() and str(v).strip()
+                },
                 description=str(spec.get("description") or "").strip(),
             )
             dimensions[dim_id] = dim
@@ -523,7 +533,7 @@ def _extract_dimension(norm: str) -> str:
     for alias, dim_id in _SQL_DIMENSION_ALIAS_MAP.items():
         if not alias:
             continue
-        if alias in {"버전", "version", "월", "년월", "month", "fam1", "family1", "패밀리1"}:
+        if alias in {"버전", "version", "월", "년월", "month"}:
             if group_signal and alias.replace(" ", "") in compact:
                 return dim_id
             continue
@@ -640,11 +650,99 @@ def resolve_dimension(dimension: str, question: str, slots: Dict[str, Any]) -> s
     return _extract_dimension(normalize_question(question))
 
 
+def normalize_dimension_value(dimension_name: str, raw_value: str) -> str:
+    dim = _SQL_DIMENSIONS.get(str(dimension_name or "").strip().lower())
+    value = str(raw_value or "").strip().strip(",.()[]{}")
+    if not value:
+        return ""
+    if dim is None:
+        return value.upper()
+
+    lowered = value.lower()
+    if lowered in dim.value_aliases:
+        return str(dim.value_aliases[lowered]).strip()
+    for sample in dim.sample_values:
+        if sample.lower() == lowered:
+            return sample
+    if dim.value_mode in {"catalog_or_free_text", "free_text"}:
+        if re.search(r"[A-Za-z]", value):
+            return value.upper()
+        return value
+    return value
+
+
+def _extract_dimension_filters(norm: str) -> Dict[str, List[str]]:
+    filters: Dict[str, List[str]] = {}
+    metric_alias_words = set(_SQL_METRIC_ALIAS_MAP.keys()) | {
+        "판매", "판매량", "순생산", "순입고", "생산", "입고", "트렌드", "추이", "비교", "분석", "알려줘", "보여줘",
+    }
+    for dim_id, dim in _SQL_DIMENSIONS.items():
+        if not dim.supports_filter:
+            continue
+        if dim_id == "yearmonth":
+            continue
+        aliases = sorted(set([dim_id] + list(dim.aliases or [])), key=len, reverse=True)
+        for alias in aliases:
+            alias = str(alias or "").strip()
+            if not alias:
+                continue
+            pat = rf"(?<!\w){re.escape(alias)}(?!\s*별)(?:\s*(?:=|:)\s*|\s+)([A-Za-z0-9가-힣_\-]+)"
+            for m in re.finditer(pat, norm, flags=re.IGNORECASE):
+                raw = str(m.group(1) or "").strip()
+                if not raw:
+                    continue
+                if raw.lower() in metric_alias_words:
+                    continue
+                normalized = normalize_dimension_value(dim_id, raw)
+                if not normalized:
+                    continue
+                bucket = filters.setdefault(dim_id, [])
+                if normalized not in bucket:
+                    bucket.append(normalized)
+    return filters
+
+
+def resolve_filters(question: str, slots: Dict[str, Any]) -> Dict[str, List[str]]:
+    merged: Dict[str, List[str]] = {}
+    raw = (slots or {}).get("filters")
+    if isinstance(raw, dict):
+        for k, vals in raw.items():
+            dim = resolve_dimension(str(k), question, slots)
+            if not dim:
+                continue
+            items = vals if isinstance(vals, list) else [vals]
+            for v in items:
+                nv = normalize_dimension_value(dim, str(v))
+                if not nv:
+                    continue
+                bucket = merged.setdefault(dim, [])
+                if nv not in bucket:
+                    bucket.append(nv)
+
+    inferred = _extract_dimension_filters(normalize_question(question))
+    for dim, vals in inferred.items():
+        bucket = merged.setdefault(dim, [])
+        for v in vals:
+            if v not in bucket:
+                bucket.append(v)
+    return merged
+
+
 def resolve_periods(question: str, slots: Dict[str, Any], *, now: Optional[datetime] = None) -> List[str]:
     current = now or datetime.now()
     periods = [str(x).strip() for x in ((slots or {}).get("periods") or []) if str(x).strip()]
 
     norm = normalize_question(question)
+    if len(periods) == 2 and ("부터" in norm and "까지" in norm):
+        try:
+            sm = int(str(periods[0])[4:6])
+            em = int(str(periods[1])[4:6])
+            sy = int(str(periods[0])[:4])
+            ey = int(str(periods[1])[:4])
+            if sy == ey and 1 <= sm <= em <= 12:
+                periods = [f"{sy:04d}{mm:02d}" for mm in range(sm, em + 1)]
+        except Exception:
+            pass
     if not periods:
         explicit = re.findall(r"\b(20\d{2})(0[1-9]|1[0-2])\b", norm)
         for yy, mm in explicit:
@@ -737,15 +835,19 @@ def infer_query_family(question: str, slots: Dict[str, Any]) -> str:
     versions = resolve_versions(question, slots)
     periods = resolve_periods(question, slots)
     period_groups = resolve_period_groups(question, slots)
+    filters = resolve_filters(question, slots)
     compare = bool(slots.get("compare")) or any(k in norm for k in ("비교", "대비", "차이", "vs", "versus"))
     trend = bool(slots.get("trend"))
     dimension = resolve_dimension(str(slots.get("dimension") or ""), question, slots)
+    compact = norm.replace(" ", "")
 
     if period_groups and compare:
         return "compare_period_groups"
     if trend or any(k in norm for k in ("트렌드", "추이", "흐름")):
         return "trend_by_period"
-    if dimension and any(k in norm.replace(" ", "") for k in ("별", "기준")):
+    if dimension and any(k in compact for k in ("별", "기준", "그룹")):
+        return "grouped_by_dimension"
+    if dimension and dimension not in filters and dimension in {"fam1", "app"}:
         return "grouped_by_dimension"
     if compare and len(versions) >= 2:
         return "compare_versions_same_period"
@@ -765,6 +867,143 @@ def build_latest_snapshot_filter(source: SQLSourceSpec) -> str:
     )
 
 
+def resolve_dimension_column(dimension_name: str, source_id: str) -> str:
+    dim = _SQL_DIMENSIONS.get(str(dimension_name or "").strip().lower())
+    if dim is None or dim.source != source_id:
+        raise ValueError(f"unsupported dimension: {dimension_name}")
+    return _safe_identifier(dim.column)
+
+
+def build_dimension_filters(
+    filters: Dict[str, List[str]],
+    *,
+    source_id: str,
+    params: Dict[str, SQLParamSpec],
+) -> Tuple[str, Dict[str, List[str]]]:
+    clauses: List[str] = []
+    normalized: Dict[str, List[str]] = {}
+    for raw_dim, raw_vals in (filters or {}).items():
+        dim_id = str(raw_dim or "").strip().lower()
+        dim = _SQL_DIMENSIONS.get(dim_id)
+        if dim is None or dim.source != source_id or not dim.supports_filter:
+            continue
+        values = raw_vals if isinstance(raw_vals, list) else [raw_vals]
+        cleaned: List[str] = []
+        for v in values:
+            nv = normalize_dimension_value(dim_id, str(v))
+            if nv and nv not in cleaned:
+                cleaned.append(nv)
+        if not cleaned:
+            continue
+        dim_col = _safe_identifier(dim.column)
+        bind_names: List[str] = []
+        for idx, _ in enumerate(cleaned, start=1):
+            pname = f"{dim_id}_{idx}"
+            params[pname] = SQLParamSpec(type="string", required=True, aliases=[pname])
+            bind_names.append(f":{pname}")
+        clauses.append(f" AND UPPER({dim_col}) IN ({', '.join(bind_names)})")
+        normalized[dim_id] = cleaned
+    return "".join(clauses), normalized
+
+
+def build_total_sql(
+    *,
+    table: str,
+    value_column: str,
+    latest_snapshot_filter: str,
+    default_filter_sql: str,
+    period_filter: str,
+    version_filter: str,
+    dimension_filter_sql: str,
+) -> str:
+    return f"""
+SELECT NVL(SUM({value_column}), 0) AS VALUE
+FROM {table}
+WHERE 1=1
+  AND {latest_snapshot_filter}
+  {default_filter_sql}
+  {period_filter}
+  {version_filter}
+  {dimension_filter_sql}
+""".strip()
+
+
+def build_trend_sql(
+    *,
+    table: str,
+    period_column: str,
+    version_column: str,
+    value_column: str,
+    latest_snapshot_filter: str,
+    default_filter_sql: str,
+    period_filter: str,
+    version_filter: str,
+    dimension_filter_sql: str,
+) -> str:
+    return f"""
+SELECT {period_column} AS PERIOD, UPPER({version_column}) AS VERSION, NVL(SUM({value_column}), 0) AS VALUE
+FROM {table}
+WHERE 1=1
+  AND {latest_snapshot_filter}
+  {default_filter_sql}
+  {period_filter}
+  {version_filter}
+  {dimension_filter_sql}
+GROUP BY {period_column}, UPPER({version_column})
+ORDER BY {period_column}, UPPER({version_column})
+""".strip()
+
+
+def build_compare_versions_sql(
+    *,
+    table: str,
+    version_column: str,
+    value_column: str,
+    latest_snapshot_filter: str,
+    default_filter_sql: str,
+    period_filter: str,
+    version_filter: str,
+    dimension_filter_sql: str,
+) -> str:
+    return f"""
+SELECT UPPER({version_column}) AS VERSION, NVL(SUM({value_column}), 0) AS VALUE
+FROM {table}
+WHERE 1=1
+  AND {latest_snapshot_filter}
+  {default_filter_sql}
+  {period_filter}
+  {version_filter}
+  {dimension_filter_sql}
+GROUP BY UPPER({version_column})
+ORDER BY UPPER({version_column})
+""".strip()
+
+
+def build_groupby_dimension_sql(
+    *,
+    table: str,
+    dimension_column: str,
+    value_column: str,
+    latest_snapshot_filter: str,
+    default_filter_sql: str,
+    period_filter: str,
+    version_filter: str,
+    dimension_filter_sql: str,
+) -> str:
+    return f"""
+SELECT {dimension_column} AS DIMENSION_VALUE, NVL(SUM({value_column}), 0) AS VALUE
+FROM {table}
+WHERE 1=1
+  AND {latest_snapshot_filter}
+  {default_filter_sql}
+  {period_filter}
+  {version_filter}
+  {dimension_filter_sql}
+GROUP BY {dimension_column}
+ORDER BY VALUE DESC
+""".strip()
+
+
 def build_execution_plan_from_slots(question: str, slots: Dict[str, Any], *, now: Optional[datetime] = None) -> Dict[str, Any]:
     metric = resolve_metric(question, slots) or "sales"
     dimension = resolve_dimension(str(slots.get("dimension") or ""), question, slots)
@@ -773,7 +1012,19 @@ def build_execution_plan_from_slots(question: str, slots: Dict[str, Any], *, now
     periods = resolve_periods(question, slots, now=now)
     period_groups = resolve_period_groups(question, slots, now=now)
     family = infer_query_family(question, slots)
-    filters = dict((slots or {}).get("filters") or {})
+    filters = resolve_filters(question, slots)
+    filter_values_upper = {
+        str(v).strip().upper()
+        for vals in filters.values()
+        for v in (vals if isinstance(vals, list) else [vals])
+        if str(v).strip()
+    }
+    if filter_values_upper:
+        versions = [v for v in versions if str(v).strip().upper() not in filter_values_upper]
+    if not versions and filters.get("version"):
+        versions = [str(v).upper() for v in filters.get("version") or [] if str(v).strip()]
+    if versions and "version" in filters:
+        del filters["version"]
     compare = bool((slots or {}).get("compare")) or family in {"compare_versions_same_period", "compare_period_groups"}
     trend = bool((slots or {}).get("trend")) or family == "trend_by_period"
     analysis = bool((slots or {}).get("analysis"))
@@ -804,6 +1055,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
     versions = [str(x).strip().upper() for x in (plan.get("versions") or []) if str(x).strip()]
     periods = [str(x).strip() for x in (plan.get("periods") or []) if str(x).strip()]
     period_groups = [x for x in (plan.get("period_groups") or []) if isinstance(x, dict)]
+    filters = dict(plan.get("filters") or {})
 
     if family not in _SQL_QUERY_FAMILIES:
         return None
@@ -828,6 +1080,20 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
 
     if dimension_id:
         dimension_id = resolve_dimension(dimension_id, str(plan.get("raw_question") or ""), plan)
+    if not filters:
+        filters = resolve_filters(str(plan.get("raw_question") or ""), plan)
+    filter_values_upper = {
+        str(v).strip().upper()
+        for vals in filters.values()
+        for v in (vals if isinstance(vals, list) else [vals])
+        if str(v).strip()
+    }
+    if filter_values_upper:
+        versions = [v for v in versions if str(v).strip().upper() not in filter_values_upper]
+    if not versions and filters.get("version"):
+        versions = [str(v).strip().upper() for v in filters.get("version") or [] if str(v).strip()]
+    if "version" in filters:
+        del filters["version"]
     if family in {"compare_versions_same_period", "trend_by_period"} and len(versions) >= 2:
         dimension_id = "version"
     if family == "grouped_by_dimension" and not dimension_id:
@@ -859,6 +1125,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
         "analysis": bool(plan.get("analysis")),
         "raw_question": str(plan.get("raw_question") or ""),
         "normalized_question": str(plan.get("normalized_question") or ""),
+        "filters": {},
     }
 
     period_filter = ""
@@ -891,6 +1158,13 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
             v_binds.append(f":{key}")
         version_filter = f" AND UPPER({version_column}) IN ({', '.join(v_binds)})"
 
+    dimension_filter_sql, normalized_filters = build_dimension_filters(
+        filters,
+        source_id=source.id,
+        params=params,
+    )
+    slot_meta["filters"] = normalized_filters
+
     snapshot_period_filter = f"{period_column} BETWEEN :start_yyyymm AND :end_yyyymm"
     if "anchor_yyyymm" in params:
         snapshot_period_filter = f"{period_column} = :anchor_yyyymm"
@@ -903,54 +1177,52 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
         )
     latest_snapshot_filter = (
         f"{snapshot_column} = (SELECT MAX({snapshot_column}) FROM {table} "
-        f"WHERE ({snapshot_period_filter}){default_filter_sql}{version_filter})"
+        f"WHERE ({snapshot_period_filter}){default_filter_sql}{version_filter}{dimension_filter_sql})"
     )
 
     if family == "compare_versions_same_period":
         if len(versions) < 2:
             return None
-        sql = f"""
-SELECT UPPER({version_column}) AS VERSION, NVL(SUM({value_column}), 0) AS VALUE
-FROM {table}
-WHERE 1=1
-  AND {latest_snapshot_filter}
-  {default_filter_sql}
-  {period_filter}
-  {version_filter}
-GROUP BY UPPER({version_column})
-ORDER BY UPPER({version_column})
-""".strip()
+        sql = build_compare_versions_sql(
+            table=table,
+            version_column=version_column,
+            value_column=value_column,
+            latest_snapshot_filter=latest_snapshot_filter,
+            default_filter_sql=default_filter_sql,
+            period_filter=period_filter,
+            version_filter=version_filter,
+            dimension_filter_sql=dimension_filter_sql,
+        )
         intent = "metric_compare_versions"
         query_id = "compare_versions_same_period"
     elif family == "trend_by_period":
-        sql = f"""
-SELECT {period_column} AS PERIOD, UPPER({version_column}) AS VERSION, NVL(SUM({value_column}), 0) AS VALUE
-FROM {table}
-WHERE 1=1
-  AND {latest_snapshot_filter}
-  {default_filter_sql}
-  {period_filter}
-  {version_filter}
-GROUP BY {period_column}, UPPER({version_column})
-ORDER BY {period_column}, UPPER({version_column})
-""".strip()
+        sql = build_trend_sql(
+            table=table,
+            period_column=period_column,
+            version_column=version_column,
+            value_column=value_column,
+            latest_snapshot_filter=latest_snapshot_filter,
+            default_filter_sql=default_filter_sql,
+            period_filter=period_filter,
+            version_filter=version_filter,
+            dimension_filter_sql=dimension_filter_sql,
+        )
         intent = "metric_trend_by_period"
         query_id = "trend_by_period"
     elif family == "grouped_by_dimension":
         if dim_spec is None or not dim_spec.supports_groupby:
             return None
-        dim_col = _safe_identifier(dim_spec.column)
-        sql = f"""
-SELECT {dim_col} AS DIMENSION_VALUE, NVL(SUM({value_column}), 0) AS VALUE
-FROM {table}
-WHERE 1=1
-  AND {latest_snapshot_filter}
-  {default_filter_sql}
-  {period_filter}
-  {version_filter}
-GROUP BY {dim_col}
-ORDER BY VALUE DESC
-""".strip()
+        dim_col = resolve_dimension_column(dimension_id, source.id)
+        sql = build_groupby_dimension_sql(
+            table=table,
+            dimension_column=dim_col,
+            value_column=value_column,
+            latest_snapshot_filter=latest_snapshot_filter,
+            default_filter_sql=default_filter_sql,
+            period_filter=period_filter,
+            version_filter=version_filter,
+            dimension_filter_sql=dimension_filter_sql,
+        )
         intent = "metric_grouped_dimension"
         query_id = "grouped_by_dimension"
     elif family == "compare_period_groups":
@@ -975,6 +1247,7 @@ WHERE 1=1
   {default_filter_sql}
   AND ({' OR '.join(where_parts)})
   {version_filter}
+  {dimension_filter_sql}
 GROUP BY CASE {' '.join(case_parts)} ELSE 'OTHER' END
 HAVING CASE {' '.join(case_parts)} ELSE 'OTHER' END <> 'OTHER'
 ORDER BY PERIOD_GROUP
@@ -982,27 +1255,27 @@ ORDER BY PERIOD_GROUP
         intent = "metric_compare_period_groups"
         query_id = "compare_period_groups"
     elif family == "total_period_range":
-        sql = f"""
-SELECT NVL(SUM({value_column}), 0) AS VALUE
-FROM {table}
-WHERE 1=1
-  AND {latest_snapshot_filter}
-  {default_filter_sql}
-  {period_filter}
-  {version_filter}
-""".strip()
+        sql = build_total_sql(
+            table=table,
+            value_column=value_column,
+            latest_snapshot_filter=latest_snapshot_filter,
+            default_filter_sql=default_filter_sql,
+            period_filter=period_filter,
+            version_filter=version_filter,
+            dimension_filter_sql=dimension_filter_sql,
+        )
         intent = intent_hint or "sales_total"
         query_id = "total_period_range"
     else:
-        sql = f"""
-SELECT NVL(SUM({value_column}), 0) AS VALUE
-FROM {table}
-WHERE 1=1
-  AND {latest_snapshot_filter}
-  {default_filter_sql}
-  {period_filter}
-  {version_filter}
-""".strip()
+        sql = build_total_sql(
+            table=table,
+            value_column=value_column,
+            latest_snapshot_filter=latest_snapshot_filter,
+            default_filter_sql=default_filter_sql,
+            period_filter=period_filter,
+            version_filter=version_filter,
+            dimension_filter_sql=dimension_filter_sql,
+        )
         intent = intent_hint or "sales_total"
         query_id = "total_single_period"
 
@@ -1093,6 +1366,7 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
     version = _extract_version(question, norm)
     versions = _extract_versions(question, norm)
     analysis = any(x in norm for x in ("분석", "해석", "비교 분석", "비교분석"))
+    filters = _extract_dimension_filters(norm)
 
     if trend and not dimension:
         dimension = "yearmonth"
@@ -1102,6 +1376,10 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
         dimension = "fam1"
     if version and version not in versions:
         versions.append(version)
+    if not versions and filters.get("version"):
+        versions = [str(v).strip().upper() for v in filters.get("version") or [] if str(v).strip()]
+    if "version" in filters:
+        del filters["version"]
 
     if compare:
         if not period_value or period_value in ("prev_quarter", "last_month", "last_year"):
@@ -1125,6 +1403,7 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
         "compare_flag": bool(compare),
         "analysis": analysis,
         "trend": trend,
+        "filters": filters,
     }
     return slots
 
@@ -1468,6 +1747,7 @@ def build_match_for_query_id(
                     "periods": periods,
                     "period_groups": period_groups,
                     "dimension": str((slots or {}).get("dimension") or ""),
+                    "filters": dict((slots or {}).get("filters") or {}),
                     "analysis": bool((slots or {}).get("analysis")),
                 },
                 period=period,
@@ -1565,8 +1845,23 @@ def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Di
         merged_slots["metric_unit"] = metric_spec.unit
         merged_slots["source_name"] = metric_spec.source
     merged_slots["versions"] = resolve_versions(question, merged_slots)
+    merged_slots["filters"] = resolve_filters(question, merged_slots)
+    filter_values_upper = {
+        str(v).strip().upper()
+        for vals in (merged_slots.get("filters") or {}).values()
+        for v in (vals if isinstance(vals, list) else [vals])
+        if str(v).strip()
+    }
+    if filter_values_upper:
+        merged_slots["versions"] = [
+            v for v in (merged_slots.get("versions") or []) if str(v).strip().upper() not in filter_values_upper
+        ]
     merged_slots["periods"] = resolve_periods(question, merged_slots, now=now)
     merged_slots["period_groups"] = resolve_period_groups(question, merged_slots, now=now)
+    if not merged_slots.get("versions") and (merged_slots.get("filters") or {}).get("version"):
+        merged_slots["versions"] = [str(v).upper() for v in (merged_slots["filters"] or {}).get("version") or []]
+    if (merged_slots.get("filters") or {}).get("version"):
+        merged_slots["filters"].pop("version", None)
     if len(merged_slots.get("versions") or []) >= 2:
         merged_slots["compare"] = True
     merged_slots, period_inferred, period_infer_reason = infer_default_period(final_intent, merged_slots, question)
@@ -1697,6 +1992,7 @@ def _fill_semantic_params(
     versions = [str(x).strip().upper() for x in (slots.get("versions") or []) if str(x).strip()]
     periods = [str(x).strip() for x in (slots.get("periods") or []) if str(x).strip()]
     period_groups = [x for x in (slots.get("period_groups") or []) if isinstance(x, dict)]
+    filters = dict(slots.get("filters") or {})
     for pname in item.params.keys():
         key = pname.lower()
         if key in ("version", "ver") and slots.get("version"):
@@ -1738,6 +2034,14 @@ def _fill_semantic_params(
             dim = str(slots.get("dimension") or "").lower()
             if dim in _SQL_DIMENSIONS:
                 result[pname] = dim
+        else:
+            m = re.fullmatch(r"([a-z_][a-z0-9_]*)_(\d+)", key)
+            if m:
+                dim_name = m.group(1)
+                idx = int(m.group(2)) - 1
+                vals = filters.get(dim_name) or []
+                if 0 <= idx < len(vals):
+                    result[pname] = str(vals[idx])
 
 
 def _normalize_param_type(spec: SQLParamSpec, value: Any) -> Any:

@@ -19,6 +19,8 @@ sources:
         description: "버전 코드 예: VH, VL"
       FAM1:
         description: "FAM1 분류"
+      APP:
+        description: "APP 분류"
       SALES_MEQ:
         description: "판매 수량"
       NET_PROD_MEQ:
@@ -53,6 +55,12 @@ dimensions:
     aliases: ["버전", "version", "버전별", "vh", "vl", "wc"]
     supports_filter: true
     supports_groupby: true
+    value_mode: "free_text"
+    sample_values: ["VH", "VL", "WC"]
+    value_aliases:
+      vh: "VH"
+      vl: "VL"
+      wc: "WC"
     description: "버전 축"
   yearmonth:
     source: psi_simul
@@ -67,7 +75,25 @@ dimensions:
     aliases: ["fam1", "패밀리1", "family1", "fam1별"]
     supports_filter: true
     supports_groupby: true
+    value_mode: "catalog_or_free_text"
+    sample_values: ["DRAM", "NAND", "MOBILE"]
+    value_aliases:
+      dram: "DRAM"
+      nand: "NAND"
     description: "FAM1 축"
+  app:
+    source: psi_simul
+    column: APP
+    aliases: ["app", "어플", "애플리케이션", "app별"]
+    supports_filter: true
+    supports_groupby: true
+    value_mode: "catalog_or_free_text"
+    sample_values: ["MOBILE", "SERVER"]
+    value_aliases:
+      mobile: "MOBILE"
+      서버: "SERVER"
+      server: "SERVER"
+    description: "APP 축"
 
 query_families:
   total_single_period:

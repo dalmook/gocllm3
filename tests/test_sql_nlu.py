@@ -53,6 +53,11 @@ class SqlNluTest(unittest.TestCase):
             ("vh vl 판매 차이 분석", "metric_compare_versions"),
             ("fam1별 판매 보여줘", "metric_grouped_dimension"),
             ("vh 기준 fam1별 순생산 보여줘", "metric_grouped_dimension"),
+            ("FAM1 DRAM 순생산 알려줘", "sales_total"),
+            ("26년 FAM1 순생산 알려줘", "metric_grouped_dimension"),
+            ("26년 FAM1별 순생산 알려줘", "metric_grouped_dimension"),
+            ("FAM1 DRAM VH와 VL 순생산 비교 분석해줘", "metric_compare_versions"),
+            ("APP MOBILE 판매 알려줘", "sales_total"),
         ]
         for q, expected_intent in cases:
             tr = self._analyze(q)
@@ -205,6 +210,63 @@ class SqlNluTest(unittest.TestCase):
         params, missing = build_sql_params_with_missing(m, "vh 기준 fam1별 순생산 보여줘")
         self.assertEqual([], missing)
         self.assertEqual("VH", params.get("v1"))
+
+    def test_dimension_value_filter_fam1_total(self):
+        tr = self._analyze("FAM1 DRAM 순생산 알려줘")
+        self.assertEqual("sales_total", tr.get("final_intent"))
+        self.assertIn(tr.get("selected_query_id"), {"total_single_period", "total_period_range"})
+        slots = tr.get("final_slots") or {}
+        self.assertEqual("net_prod", slots.get("metric"))
+        self.assertEqual(["DRAM"], (slots.get("filters") or {}).get("fam1"))
+
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        params, missing = build_sql_params_with_missing(m, "FAM1 DRAM 순생산 알려줘")
+        self.assertEqual([], missing)
+        self.assertEqual("DRAM", params.get("fam1_1"))
+
+    def test_dimension_value_filter_app_total(self):
+        tr = self._analyze("APP MOBILE 판매 알려줘")
+        self.assertEqual("sales_total", tr.get("final_intent"))
+        slots = tr.get("final_slots") or {}
+        self.assertEqual("sales", slots.get("metric"))
+        self.assertEqual(["MOBILE"], (slots.get("filters") or {}).get("app"))
+
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        params, missing = build_sql_params_with_missing(m, "APP MOBILE 판매 알려줘")
+        self.assertEqual([], missing)
+        self.assertEqual("MOBILE", params.get("app_1"))
+
+    def test_dimension_filter_compare_versions(self):
+        tr = self._analyze("FAM1 DRAM VH와 VL 순생산 비교 분석해줘")
+        self.assertEqual("metric_compare_versions", tr.get("final_intent"))
+        slots = tr.get("final_slots") or {}
+        self.assertEqual(["DRAM"], (slots.get("filters") or {}).get("fam1"))
+        self.assertEqual(["VH", "VL"], slots.get("versions"))
+
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        params, missing = build_sql_params_with_missing(m, "FAM1 DRAM VH와 VL 순생산 비교 분석해줘")
+        self.assertEqual([], missing)
+        self.assertEqual("DRAM", params.get("fam1_1"))
+        self.assertEqual("VH", params.get("v1"))
+        self.assertEqual("VL", params.get("v2"))
+
+    def test_dimension_filter_trend(self):
+        tr = self._analyze("FAM1 DRAM 2월부터 5월까지 판매 트렌드 알려줘")
+        self.assertEqual("metric_trend_by_period", tr.get("final_intent"))
+        slots = tr.get("final_slots") or {}
+        self.assertEqual(["DRAM"], (slots.get("filters") or {}).get("fam1"))
+        self.assertEqual(["202602", "202603", "202604", "202605"], slots.get("periods"))
+
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        params, missing = build_sql_params_with_missing(m, "FAM1 DRAM 2월부터 5월까지 판매 트렌드 알려줘")
+        self.assertEqual([], missing)
+        self.assertEqual("DRAM", params.get("fam1_1"))
+        self.assertEqual("202602", params.get("p1"))
+        self.assertEqual("202605", params.get("p4"))
 
 
 if __name__ == "__main__":

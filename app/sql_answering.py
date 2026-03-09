@@ -29,6 +29,18 @@ def _format_number(value: Any, unit: str = "개") -> str:
     return f"{round(n, 1):,}{unit}"
 
 
+def _format_filters(filters: Dict[str, Any]) -> str:
+    if not isinstance(filters, dict) or not filters:
+        return ""
+    parts: List[str] = []
+    for k, vals in filters.items():
+        items = vals if isinstance(vals, list) else [vals]
+        cleaned = [str(v).strip() for v in items if str(v).strip()]
+        if cleaned:
+            parts.append(f"{str(k).upper()}={','.join(cleaned)}")
+    return ", ".join(parts)
+
+
 def _pick_scalar_value(rows: List[Dict[str, Any]]) -> Optional[float]:
     if not rows:
         return None
@@ -86,6 +98,7 @@ def render_compare_versions_answer(
     unit: str,
     period_label: str,
     source_name: str,
+    filter_text: str = "",
 ) -> str:
     if len(rows) < 2:
         return (
@@ -155,7 +168,7 @@ def render_compare_versions_answer(
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {top_ver} {metric_label}은 {low_ver} 대비 {_format_number(diff, f' {unit}')} 높습니다.",
+            f"- {filter_text + ' 기준 ' if filter_text else ''}{top_ver} {metric_label}은 {low_ver} 대비 {_format_number(diff, f' {unit}')} 높습니다.",
             "",
             "📊 비교 결과",
             f"- {left_ver}: {_format_number(left_val, f' {unit}')}",
@@ -186,6 +199,7 @@ def render_trend_answer(
     metric: str,
     unit: str,
     source_name: str,
+    filter_text: str = "",
 ) -> str:
     metric_label = {
         "sales": "판매",
@@ -254,7 +268,7 @@ def render_trend_answer(
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {metric_label}은 {_ym_label(ordered[0][0])}→{_ym_label(ordered[-1][0])} 기준 {pattern} 패턴입니다.",
+            f"- {filter_text + ' 기준 ' if filter_text else ''}{metric_label}은 {_ym_label(ordered[0][0])}→{_ym_label(ordered[-1][0])} 기준 {pattern} 패턴입니다.",
             "",
             "📈 기간별 추이",
             *trend_lines,
@@ -275,6 +289,7 @@ def render_compare_period_groups_answer(
     metric: str,
     unit: str,
     source_name: str,
+    filter_text: str = "",
 ) -> str:
     metric_label = {
         "sales": "판매",
@@ -321,7 +336,7 @@ def render_compare_period_groups_answer(
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {metric_label}은 {top_label}이 {low_label} 대비 {_format_number(abs(stat['diff']), f' {unit}')} {direction}.",
+            f"- {filter_text + ' 기준 ' if filter_text else ''}{metric_label}은 {top_label}이 {low_label} 대비 {_format_number(abs(stat['diff']), f' {unit}')} {direction}.",
             "",
             "📊 기간 그룹 비교",
             f"- {left_label}: {_format_number(left_val, f' {unit}')}",
@@ -347,6 +362,7 @@ def render_grouped_dimension_answer(
     unit: str,
     source_name: str,
     dimension: str,
+    filter_text: str = "",
 ) -> str:
     metric_label = {
         "sales": "판매",
@@ -386,7 +402,7 @@ def render_grouped_dimension_answer(
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {dim_label} 기준 {metric_label} 최대 항목은 {top_key}입니다.",
+            f"- {(filter_text + '에서 ' if filter_text else '')}{dim_label} 기준 {metric_label} 최대 항목은 {top_key}입니다.",
             "",
             "📊 그룹별 결과",
             *lines,
@@ -410,6 +426,7 @@ def render_total_answer(
     period_label: str,
     source_name: str,
     version_hint: str = "전체",
+    filter_text: str = "",
 ) -> str:
     total = 0.0
     if rows:
@@ -425,7 +442,7 @@ def render_total_answer(
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {period_label} 기준 {version_hint} {metric} 합계는 {_format_number(total, f' {unit}')}입니다.",
+            f"- {filter_text + ' / ' if filter_text else ''}{period_label} 기준 {version_hint} {metric} 합계는 {_format_number(total, f' {unit}')}입니다.",
             "",
             "📊 데이터 기반 답변",
             f"- 합계: {_format_number(total, f' {unit}')}",
@@ -479,6 +496,7 @@ def render_answer_rule_based(
     unit = str(slots.get("metric_unit") or "MEQ")
     source_name = str(slots.get("source_name") or "psi_simul")
     period_label = str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
+    filter_text = _format_filters(dict(slots.get("filters") or {}))
     family = str(slots.get("family") or "")
     primary_query_id = str(primary.get("query_id") or "")
     if not family and primary_query_id:
@@ -491,6 +509,7 @@ def render_answer_rule_based(
             unit=unit,
             period_label=period_label,
             source_name=source_name,
+            filter_text=filter_text,
         )
     if intent == "metric_trend_by_period" or family == "trend_by_period":
         return render_trend_answer(
@@ -498,6 +517,7 @@ def render_answer_rule_based(
             metric=metric,
             unit=unit,
             source_name=source_name,
+            filter_text=filter_text,
         )
     if intent == "metric_compare_period_groups" or family == "compare_period_groups":
         return render_compare_period_groups_answer(
@@ -505,6 +525,7 @@ def render_answer_rule_based(
             metric=metric,
             unit=unit,
             source_name=source_name,
+            filter_text=filter_text,
         )
     if intent == "metric_grouped_dimension" or family == "grouped_by_dimension":
         return render_grouped_dimension_answer(
@@ -513,6 +534,7 @@ def render_answer_rule_based(
             unit=unit,
             source_name=source_name,
             dimension=str(slots.get("dimension") or ""),
+            filter_text=filter_text,
         )
     if intent == "sales_compare":
         if primary_rows and (("VERSION" in primary_rows[0]) or ("version" in primary_rows[0])):
@@ -522,6 +544,7 @@ def render_answer_rule_based(
                 unit=unit,
                 period_label=period_label,
                 source_name=source_name,
+                filter_text=filter_text,
             )
         c = _pick_compare_values(primary_rows)
         summary = f"비교 기준 판매량은 현재 {_format_number(c['current'])}, 이전 {_format_number(c['previous'])}입니다."
@@ -563,7 +586,8 @@ def render_answer_rule_based(
             if total is None:
                 total = 0.0
             version = str(slots.get("version") or "전체")
-            summary = f"{period.get('label') or '지정 기간'} {version} 누적 판매량은 {_format_number(total)}입니다."
+            prefix = f"{filter_text} 기준 " if filter_text else ""
+            summary = f"{prefix}{period.get('label') or '지정 기간'} {version} 누적 판매량은 {_format_number(total)}입니다."
             data_lines.append(f"- 누적 판매량: {_format_number(total)}")
             aux = by_role.get("aux")
             if aux:
