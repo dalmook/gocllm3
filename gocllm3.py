@@ -169,7 +169,7 @@ LLM_JOB_QUEUE_MAX = max(1, int(os.getenv("LLM_JOB_QUEUE_MAX", "200")))
 LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "4")))
 LLM_PROFILE_LOG = os.getenv("LLM_PROFILE_LOG", "true").lower() == "true"
 ISSUE_SUMMARY_SPEED_MODE = os.getenv("ISSUE_SUMMARY_SPEED_MODE", "false").lower() == "true"
-ENABLE_FEEDBACK_CARD = os.getenv("ENABLE_FEEDBACK_CARD", "true").lower() == "true"
+ENABLE_FEEDBACK_CARD = os.getenv("ENABLE_FEEDBACK_CARD", "false").lower() == "true"
 LLM_ALLOWED_USERS_SQL = os.getenv(
     "LLM_ALLOWED_USERS_SQL",
     "SELECT SSO_ID FROM SCM_WP.T_T_FOR_MASTER A WHERE 1=1 and a.dept_name in ('공급망운영그룹(메모리)','SCM그룹(메모리)','운영전략그룹(메모리)','Global운영팀(메모리)') and A.DEPT_NAME LIKE '%메모리%' and a.POSITION_CODE is not null AND A.SSO_ID NOT IN ('SCM.RPA','SCM 봇','메모리STO2','메모리 STO','dalbong.chatbot01', 'dalbongbot01', 'dalbong.bot01', 'command.center', 'thatcoolguy')"
