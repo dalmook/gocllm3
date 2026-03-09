@@ -2098,7 +2098,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             retrieve_top_k = max(RAG_NUM_RESULT_DOC, RAG_API_MAX_NUM_RESULT_DOC)
 
         target_indexes = None
-        if strong_mail_intent or issue_summary_intent:
+        if force_glossary:
+            target_indexes = [GLOSSARY_INDEX_NAME]
+        elif strong_mail_intent or issue_summary_intent:
             # 이슈/요약류 질문은 glossary 잡음을 줄이기 위해 메일 인덱스 우선
             target_indexes = [MAIL_INDEX_NAME]
 
@@ -2119,6 +2121,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 
         all_mail_docs = [d for d in all_rag_documents if d.get("_index") == MAIL_INDEX_NAME]
         all_glossary_docs = [d for d in all_rag_documents if d.get("_index") == GLOSSARY_INDEX_NAME]
+        if force_glossary:
+            all_mail_docs = []
 
         if time_range and all_mail_docs:
             ranged_mail_docs = _filter_docs_by_datetime_range(
@@ -2221,12 +2225,6 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 rag_relevant = True
                 selected_docs = glossary_docs[:RAG_CONTEXT_DOCS]
                 rag_context = format_rag_context(selected_docs, max_docs=RAG_CONTEXT_DOCS)
-            elif mail_docs and is_rag_result_relevant(effective_question, mail_docs):
-                selected_rag_domain = "mail"
-                mail_match = True
-                rag_relevant = True
-                selected_docs = mail_docs
-                rag_context = format_rag_context(mail_docs, max_docs=RAG_CONTEXT_DOCS)
         elif mail_docs and is_rag_result_relevant(effective_question, mail_docs):
             selected_rag_domain = "mail"
             mail_match = True
@@ -2380,7 +2378,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 stats["llm_calls"] += 1
 
                 reason = "관련 문서를 찾지 못했습니다."
-                if skip_rag:
+                if force_glossary:
+                    reason = "용어 사전에서 일치 항목을 찾지 못했습니다."
+                elif skip_rag:
                     reason = f"검색 문서 유사도가 기준치({RAG_SIMILARITY_THRESHOLD})보다 낮았습니다."
                 elif (mail_docs or glossary_docs) and not rag_relevant:
                     reason = "검색 문서는 있었지만 질문과의 관련성이 낮았습니다."
