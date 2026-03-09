@@ -8,7 +8,11 @@ queries:
     sql: |
       SELECT SUM(SALES_MEQ) AS sales
       FROM mst_psi_simul_report
-      WHERE VERSION = :version
+      WHERE 1=1
+        AND workdate = to_char(sysdate,'yyyymmdd')
+        AND P_MODULE = 'PMIX'
+        AND S_MODULE = 'SOKBO'
+        AND VERSION = :version
         AND YEARMONTH = :yearmonth
     params:
       version:
