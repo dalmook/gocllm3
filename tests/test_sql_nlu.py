@@ -159,6 +159,28 @@ class SqlNluTest(unittest.TestCase):
         self.assertEqual("VL", params.get("v2"))
         self.assertTrue(params.get("anchor_yyyymm") or (params.get("start_yyyymm") and params.get("end_yyyymm")))
 
+    def test_rule_renderer_shows_resolved_month_in_criteria(self):
+        tr = self._analyze("2월 vh와 vl 순생산 비교 분석해줘")
+        answer = render_answer_rule_based(
+            "2월 vh와 vl 순생산 비교 분석해줘",
+            intent=tr.get("final_intent") or "metric_compare_versions",
+            slots=tr.get("final_slots") or {},
+            period=tr.get("resolved_period") or {},
+            results=[
+                {
+                    "query_id": "compare_versions_same_period",
+                    "role": "primary",
+                    "df": FakeDF([
+                        {"VERSION": "VH", "VALUE": 120.0},
+                        {"VERSION": "VL", "VALUE": 100.0},
+                    ]),
+                },
+            ],
+            period_infer_reason=tr.get("period_infer_reason") or "",
+        )
+        self.assertIn("해석 기간: 2026년 2월", answer)
+        self.assertIn("질문 표현: 2월", answer)
+
     def test_trend_periods_slots_and_params(self):
         tr = self._analyze("2월 3월 4월 vh 트렌드 분석해줘")
         self.assertEqual("metric_trend_by_period", tr.get("final_intent"))

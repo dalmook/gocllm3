@@ -91,26 +91,70 @@ def compute_diff_and_ratio(base: float, other: float) -> Dict[str, float]:
     return {"diff": diff, "ratio": ratio}
 
 
+def _format_yyyymm_korean(yyyymm: str) -> str:
+    value = str(yyyymm or "")
+    if re.fullmatch(r"20\d{2}(0[1-9]|1[0-2])", value):
+        return f"{value[:4]}년 {int(value[4:6])}월"
+    return value
+
+
+def _build_resolved_period_line(period: Dict[str, Any]) -> str:
+    if not isinstance(period, dict) or not period:
+        return ""
+
+    start = str(period.get("start_yyyymm") or "")
+    end = str(period.get("end_yyyymm") or "")
+    label = str(period.get("label") or "").strip()
+    compare_start = str(period.get("compare_start_yyyymm") or "")
+    compare_end = str(period.get("compare_end_yyyymm") or "")
+
+    if not start or not end:
+        return ""
+
+    if start == end:
+        resolved = _format_yyyymm_korean(start)
+    else:
+        resolved = f"{_format_yyyymm_korean(start)}~{_format_yyyymm_korean(end)}"
+
+    line = f"- 해석 기간: {resolved}"
+    if label and label != resolved:
+        line += f" (질문 표현: {label})"
+
+    if compare_start and compare_end:
+        if compare_start == compare_end:
+            compare_label = _format_yyyymm_korean(compare_start)
+        else:
+            compare_label = f"{_format_yyyymm_korean(compare_start)}~{_format_yyyymm_korean(compare_end)}"
+        line += f" / 비교 기간: {compare_label}"
+
+    return line
+
+
 def render_compare_versions_answer(
     *,
     rows: List[Dict[str, Any]],
     metric: str,
     unit: str,
     period_label: str,
+    resolved_period_line: str,
     source_name: str,
     filter_text: str = "",
 ) -> str:
     if len(rows) < 2:
-        return (
-            "📌 한줄 요약\n"
-            "- 비교 가능한 버전 데이터가 부족합니다.\n\n"
-            "📊 비교 결과\n"
-            "- 버전 2개 이상이 필요합니다.\n\n"
-            "⚠️ 기준\n"
-            f"- 기준 기간: {period_label}\n"
-            f"- 기준 source: {source_name}\n"
-            "- 최신 적재 기준으로 조회"
-        )
+        lines = [
+            "📌 한줄 요약",
+            "- 비교 가능한 버전 데이터가 부족합니다.",
+            "",
+            "📊 비교 결과",
+            "- 버전 2개 이상이 필요합니다.",
+            "",
+            "⚠️ 기준",
+            f"- 기준 기간: {period_label}",
+        ]
+        if resolved_period_line:
+            lines.append(resolved_period_line)
+        lines.extend([f"- 기준 source: {source_name}", "- 최신 적재 기준으로 조회"])
+        return "\n".join(lines)
 
     parsed = []
     for row in rows:
@@ -124,16 +168,20 @@ def render_compare_versions_answer(
             parsed.append((version, fval))
 
     if len(parsed) < 2:
-        return (
-            "📌 한줄 요약\n"
-            "- 비교 가능한 버전 데이터가 부족합니다.\n\n"
-            "📊 비교 결과\n"
-            "- 버전 값 파싱에 실패했습니다.\n\n"
-            "⚠️ 기준\n"
-            f"- 기준 기간: {period_label}\n"
-            f"- 기준 source: {source_name}\n"
-            "- 최신 적재 기준으로 조회"
-        )
+        lines = [
+            "📌 한줄 요약",
+            "- 비교 가능한 버전 데이터가 부족합니다.",
+            "",
+            "📊 비교 결과",
+            "- 버전 값 파싱에 실패했습니다.",
+            "",
+            "⚠️ 기준",
+            f"- 기준 기간: {period_label}",
+        ]
+        if resolved_period_line:
+            lines.append(resolved_period_line)
+        lines.extend([f"- 기준 source: {source_name}", "- 최신 적재 기준으로 조회"])
+        return "\n".join(lines)
 
     parsed.sort(key=lambda x: x[0])
     left_ver, left_val = parsed[0]
@@ -181,6 +229,7 @@ def render_compare_versions_answer(
             "",
             "⚠️ 기준",
             f"- 기준 기간: {period_label}",
+            *([resolved_period_line] if resolved_period_line else []),
             f"- 기준 source: {source_name}",
             "- 최신 적재 기준으로 조회",
         ]
@@ -198,6 +247,7 @@ def render_trend_answer(
     rows: List[Dict[str, Any]],
     metric: str,
     unit: str,
+    resolved_period_line: str,
     source_name: str,
     filter_text: str = "",
 ) -> str:
@@ -208,15 +258,19 @@ def render_trend_answer(
     }.get(metric, metric)
 
     if not rows:
-        return (
-            "📌 한줄 요약\n"
-            "- 추이 데이터가 없습니다.\n\n"
-            "📈 기간별 추이\n"
-            "- 조회 결과가 없습니다.\n\n"
-            "⚠️ 기준\n"
-            f"- 기준 source: {source_name}\n"
-            "- 최신 적재 기준 조회"
-        )
+        lines = [
+            "📌 한줄 요약",
+            "- 추이 데이터가 없습니다.",
+            "",
+            "📈 기간별 추이",
+            "- 조회 결과가 없습니다.",
+            "",
+            "⚠️ 기준",
+        ]
+        if resolved_period_line:
+            lines.append(resolved_period_line)
+        lines.extend([f"- 기준 source: {source_name}", "- 최신 적재 기준 조회"])
+        return "\n".join(lines)
 
     agg_by_period: Dict[str, float] = {}
     for row in rows:
@@ -232,15 +286,19 @@ def render_trend_answer(
 
     ordered = sorted(agg_by_period.items(), key=lambda x: x[0])
     if not ordered:
-        return (
-            "📌 한줄 요약\n"
-            "- 추이 데이터가 없습니다.\n\n"
-            "📈 기간별 추이\n"
-            "- 조회 결과가 없습니다.\n\n"
-            "⚠️ 기준\n"
-            f"- 기준 source: {source_name}\n"
-            "- 최신 적재 기준 조회"
-        )
+        lines = [
+            "📌 한줄 요약",
+            "- 추이 데이터가 없습니다.",
+            "",
+            "📈 기간별 추이",
+            "- 조회 결과가 없습니다.",
+            "",
+            "⚠️ 기준",
+        ]
+        if resolved_period_line:
+            lines.append(resolved_period_line)
+        lines.extend([f"- 기준 source: {source_name}", "- 최신 적재 기준 조회"])
+        return "\n".join(lines)
 
     first_v = ordered[0][1]
     last_v = ordered[-1][1]
@@ -277,6 +335,7 @@ def render_trend_answer(
             *analysis,
             "",
             "⚠️ 기준",
+            *([resolved_period_line] if resolved_period_line else []),
             f"- 기준 source: {source_name}",
             "- 최신 적재 기준 조회",
         ]
@@ -288,6 +347,7 @@ def render_compare_period_groups_answer(
     rows: List[Dict[str, Any]],
     metric: str,
     unit: str,
+    resolved_period_line: str,
     source_name: str,
     filter_text: str = "",
 ) -> str:
@@ -309,15 +369,19 @@ def render_compare_period_groups_answer(
             parsed.append((label, fval))
 
     if len(parsed) < 2:
-        return (
-            "📌 한줄 요약\n"
-            "- 기간 그룹 비교 데이터가 부족합니다.\n\n"
-            "📊 기간 그룹 비교\n"
-            "- 비교할 그룹 2개 이상이 필요합니다.\n\n"
-            "⚠️ 기준\n"
-            f"- 기준 source: {source_name}\n"
-            "- 최신 적재 기준 조회"
-        )
+        lines = [
+            "📌 한줄 요약",
+            "- 기간 그룹 비교 데이터가 부족합니다.",
+            "",
+            "📊 기간 그룹 비교",
+            "- 비교할 그룹 2개 이상이 필요합니다.",
+            "",
+            "⚠️ 기준",
+        ]
+        if resolved_period_line:
+            lines.append(resolved_period_line)
+        lines.extend([f"- 기준 source: {source_name}", "- 최신 적재 기준 조회"])
+        return "\n".join(lines)
 
     parsed.sort(key=lambda x: x[0])
     left_label, left_val = parsed[0]
@@ -349,6 +413,7 @@ def render_compare_period_groups_answer(
             "- 필요하면 월 단위 드릴다운으로 원인 구간을 추가 확인할 수 있습니다.",
             "",
             "⚠️ 기준",
+            *([resolved_period_line] if resolved_period_line else []),
             f"- 기준 source: {source_name}",
             "- 최신 적재 기준 조회",
         ]
@@ -360,6 +425,7 @@ def render_grouped_dimension_answer(
     rows: List[Dict[str, Any]],
     metric: str,
     unit: str,
+    resolved_period_line: str,
     source_name: str,
     dimension: str,
     filter_text: str = "",
@@ -386,15 +452,19 @@ def render_grouped_dimension_answer(
         if key:
             parsed.append((key, fval))
     if not parsed:
-        return (
-            "📌 한줄 요약\n"
-            "- 그룹 데이터가 없습니다.\n\n"
-            "📊 그룹별 결과\n"
-            "- 조회 결과가 없습니다.\n\n"
-            "⚠️ 기준\n"
-            f"- 기준 source: {source_name}\n"
-            "- 최신 적재 기준 조회"
-        )
+        lines = [
+            "📌 한줄 요약",
+            "- 그룹 데이터가 없습니다.",
+            "",
+            "📊 그룹별 결과",
+            "- 조회 결과가 없습니다.",
+            "",
+            "⚠️ 기준",
+        ]
+        if resolved_period_line:
+            lines.append(resolved_period_line)
+        lines.extend([f"- 기준 source: {source_name}", "- 최신 적재 기준 조회"])
+        return "\n".join(lines)
 
     parsed.sort(key=lambda x: x[1], reverse=True)
     top_key, top_val = parsed[0]
@@ -412,6 +482,7 @@ def render_grouped_dimension_answer(
             "- 상위/하위 그룹 편차를 함께 보면 분산 정도를 빠르게 파악할 수 있습니다.",
             "",
             "⚠️ 기준",
+            *([resolved_period_line] if resolved_period_line else []),
             f"- 기준 source: {source_name}",
             "- 최신 적재 기준 조회",
         ]
@@ -424,6 +495,7 @@ def render_total_answer(
     metric: str,
     unit: str,
     period_label: str,
+    resolved_period_line: str,
     source_name: str,
     version_hint: str = "전체",
     filter_text: str = "",
@@ -449,6 +521,7 @@ def render_total_answer(
             "",
             "⚠️ 기준",
             f"- 기준 기간: {period_label}",
+            *([resolved_period_line] if resolved_period_line else []),
             f"- 기준 source: {source_name}",
             "- 최신 적재 기준 조회",
         ]
@@ -496,6 +569,7 @@ def render_answer_rule_based(
     unit = str(slots.get("metric_unit") or "MEQ")
     source_name = str(slots.get("source_name") or "psi_simul")
     period_label = str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
+    resolved_period_line = _build_resolved_period_line(period)
     filter_text = _format_filters(dict(slots.get("filters") or {}))
     family = str(slots.get("family") or "")
     primary_query_id = str(primary.get("query_id") or "")
@@ -508,6 +582,7 @@ def render_answer_rule_based(
             metric=metric,
             unit=unit,
             period_label=period_label,
+            resolved_period_line=resolved_period_line,
             source_name=source_name,
             filter_text=filter_text,
         )
@@ -516,6 +591,7 @@ def render_answer_rule_based(
             rows=primary_rows,
             metric=metric,
             unit=unit,
+            resolved_period_line=resolved_period_line,
             source_name=source_name,
             filter_text=filter_text,
         )
@@ -524,6 +600,7 @@ def render_answer_rule_based(
             rows=primary_rows,
             metric=metric,
             unit=unit,
+            resolved_period_line=resolved_period_line,
             source_name=source_name,
             filter_text=filter_text,
         )
@@ -532,6 +609,7 @@ def render_answer_rule_based(
             rows=primary_rows,
             metric=metric,
             unit=unit,
+            resolved_period_line=resolved_period_line,
             source_name=source_name,
             dimension=str(slots.get("dimension") or ""),
             filter_text=filter_text,
@@ -543,6 +621,7 @@ def render_answer_rule_based(
                 metric=metric,
                 unit=unit,
                 period_label=period_label,
+                resolved_period_line=resolved_period_line,
                 source_name=source_name,
                 filter_text=filter_text,
             )
@@ -578,6 +657,7 @@ def render_answer_rule_based(
                 metric=metric,
                 unit=unit,
                 period_label=period_label,
+                resolved_period_line=resolved_period_line,
                 source_name=source_name,
                 version_hint="전체",
             )
@@ -614,6 +694,8 @@ def render_answer_rule_based(
     lines.extend(["", "🧭 해석 기준"])
     if period_infer_reason:
         lines.append(f"- {period_infer_reason}")
+    if resolved_period_line:
+        lines.append(resolved_period_line)
     lines.append(f"- 기준: version={version}, 기간={period_label}, 집계={agg_map.get(agg, agg)}, 차원={dim}")
     lines.extend(["", "🔗 이슈지 바로가기 👉 https://go/issueG"])
     return "\n".join(lines)
@@ -622,7 +704,8 @@ def render_answer_rule_based(
 def build_sql_render_prompt(payload: Dict[str, Any]) -> str:
     return (
         "다음 structured 결과를 바탕으로 한국어 답변을 작성하세요. SQL 작성 금지. "
-        "반드시 섹션 3개(한줄 요약, 데이터 기반 답변, 해석 기준)로 답하세요.\n"
+        "반드시 섹션 3개(한줄 요약, 데이터 기반 답변, 해석 기준)로 답하세요. "
+        "해석 기준 섹션에는 resolved_period_line이 있으면 그대로 반영해 질문의 기간 표현과 실제 적용 기간을 명확히 드러내세요.\n"
         f"INPUT={json.dumps(payload, ensure_ascii=False)}"
     )
 
@@ -650,6 +733,7 @@ def render_answer_with_llm(
         "intent": intent,
         "slots": slots,
         "period": period,
+        "resolved_period_line": _build_resolved_period_line(period),
         "period_infer_reason": period_infer_reason,
         "result_rows": [
             {
