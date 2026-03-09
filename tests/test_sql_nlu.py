@@ -39,6 +39,11 @@ class SqlNluTest(unittest.TestCase):
             ("올해 몇개", "sales_total"),
             ("2월 실적", "sales_total"),
             ("최근 3개월 판매 추이", "sales_trend"),
+            ("vh와 vl 순생산 비교 분석해줘", "metric_compare_versions"),
+            ("vh와 vl 판매 비교 분석해줘", "metric_compare_versions"),
+            ("vh와 vl 순입고 비교 분석해줘", "metric_compare_versions"),
+            ("2월 vh와 vl 순생산 비교 분석해줘", "metric_compare_versions"),
+            ("version vh vs vl 판매 비교", "metric_compare_versions"),
         ]
         for q, expected_intent in cases:
             tr = self._analyze(q)
@@ -122,6 +127,24 @@ class SqlNluTest(unittest.TestCase):
         self.assertIn("📊 데이터 기반 답변", answer)
         self.assertIn("🧭 해석 기준", answer)
         self.assertNotIn("SALES=", answer)
+
+    def test_compare_versions_slots_and_params(self):
+        tr = self._analyze("2월 vh와 vl 순생산 비교 분석해줘")
+        self.assertEqual("metric_compare_versions", tr.get("final_intent"))
+        slots = tr.get("final_slots") or {}
+        self.assertEqual("net_prod", slots.get("metric"))
+        self.assertEqual(["VH", "VL"], slots.get("versions"))
+        self.assertTrue(slots.get("compare"))
+        self.assertTrue(slots.get("analysis"))
+
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        params, missing = build_sql_params_with_missing(m, "2월 vh와 vl 순생산 비교 분석해줘")
+        self.assertEqual([], missing)
+        self.assertEqual("VH", params.get("v1"))
+        self.assertEqual("VL", params.get("v2"))
+        self.assertTrue(params.get("start_yyyymm"))
+        self.assertTrue(params.get("end_yyyymm"))
 
 
 if __name__ == "__main__":

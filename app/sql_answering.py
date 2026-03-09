@@ -70,6 +70,110 @@ def _pick_compare_values(rows: List[Dict[str, Any]]) -> Dict[str, float]:
     return out
 
 
+def compute_diff_and_ratio(base: float, other: float) -> Dict[str, float]:
+    diff = base - other
+    if other == 0:
+        ratio = 0.0
+    else:
+        ratio = (diff / other) * 100.0
+    return {"diff": diff, "ratio": ratio}
+
+
+def render_compare_versions_answer(
+    *,
+    rows: List[Dict[str, Any]],
+    metric: str,
+    unit: str,
+    period_label: str,
+    source_name: str,
+) -> str:
+    if len(rows) < 2:
+        return (
+            "📌 한줄 요약\n"
+            "- 비교 가능한 버전 데이터가 부족합니다.\n\n"
+            "📊 비교 결과\n"
+            "- 버전 2개 이상이 필요합니다.\n\n"
+            "⚠️ 기준\n"
+            f"- 기준 기간: {period_label}\n"
+            f"- 기준 source: {source_name}\n"
+            "- 최신 적재 기준으로 조회"
+        )
+
+    parsed = []
+    for row in rows:
+        version = str(row.get("VERSION") or row.get("version") or "").strip().upper()
+        value = row.get("VALUE") if "VALUE" in row else row.get("value")
+        try:
+            fval = float(value or 0.0)
+        except Exception:
+            fval = 0.0
+        if version:
+            parsed.append((version, fval))
+
+    if len(parsed) < 2:
+        return (
+            "📌 한줄 요약\n"
+            "- 비교 가능한 버전 데이터가 부족합니다.\n\n"
+            "📊 비교 결과\n"
+            "- 버전 값 파싱에 실패했습니다.\n\n"
+            "⚠️ 기준\n"
+            f"- 기준 기간: {period_label}\n"
+            f"- 기준 source: {source_name}\n"
+            "- 최신 적재 기준으로 조회"
+        )
+
+    parsed.sort(key=lambda x: x[0])
+    left_ver, left_val = parsed[0]
+    right_ver, right_val = parsed[1]
+    if left_val >= right_val:
+        top_ver, top_val = left_ver, left_val
+        low_ver, low_val = right_ver, right_val
+    else:
+        top_ver, top_val = right_ver, right_val
+        low_ver, low_val = left_ver, left_val
+
+    stat = compute_diff_and_ratio(top_val, low_val)
+    diff = stat["diff"]
+    ratio = stat["ratio"]
+    ratio_text = f"{ratio:+.1f}%"
+
+    metric_label = {
+        "sales": "판매",
+        "net_prod": "순생산",
+        "net_ipgo": "순입고",
+    }.get(metric, metric)
+
+    analysis_lines: List[str] = []
+    if abs(ratio) >= 20:
+        analysis_lines.append(f"- {top_ver} 우세가 뚜렷합니다.")
+    elif abs(ratio) >= 5:
+        analysis_lines.append(f"- {top_ver}가 {low_ver}보다 높게 나타났습니다.")
+    else:
+        analysis_lines.append("- 두 버전 간 차이가 크지 않습니다.")
+    analysis_lines.append("- 추가 기간 비교 시 추세 판단 정확도가 높아집니다.")
+
+    return "\n".join(
+        [
+            "📌 한줄 요약",
+            f"- {top_ver} {metric_label}은 {low_ver} 대비 {_format_number(diff, f' {unit}')} 높습니다.",
+            "",
+            "📊 비교 결과",
+            f"- {left_ver}: {_format_number(left_val, f' {unit}')}",
+            f"- {right_ver}: {_format_number(right_val, f' {unit}')}",
+            f"- 차이: {_format_number(diff, f' {unit}')}",
+            f"- 증감률: {ratio_text}",
+            "",
+            "💡 분석",
+            *analysis_lines,
+            "",
+            "⚠️ 기준",
+            f"- 기준 기간: {period_label}",
+            f"- 기준 source: {source_name}",
+            "- 최신 적재 기준으로 조회",
+        ]
+    )
+
+
 def _top_months(rows: List[Dict[str, Any]], top_n: int = 2) -> List[str]:
     vals = []
     for r in rows:
@@ -107,7 +211,28 @@ def render_answer_rule_based(
     summary = "조회 결과를 확인했습니다."
     data_lines: List[str] = []
 
+    metric = str(slots.get("metric") or "sales")
+    unit = str(slots.get("metric_unit") or "MEQ")
+    source_name = str(slots.get("source_name") or "psi_simul")
+    period_label = str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
+
+    if intent == "metric_compare_versions":
+        return render_compare_versions_answer(
+            rows=primary_rows,
+            metric=metric,
+            unit=unit,
+            period_label=period_label,
+            source_name=source_name,
+        )
     if intent == "sales_compare":
+        if primary_rows and (("VERSION" in primary_rows[0]) or ("version" in primary_rows[0])):
+            return render_compare_versions_answer(
+                rows=primary_rows,
+                metric=metric,
+                unit=unit,
+                period_label=period_label,
+                source_name=source_name,
+            )
         c = _pick_compare_values(primary_rows)
         summary = f"비교 기준 판매량은 현재 {_format_number(c['current'])}, 이전 {_format_number(c['previous'])}입니다."
         data_lines.append(f"- 현재 기간: {_format_number(c['current'])}")

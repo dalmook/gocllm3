@@ -65,10 +65,41 @@ class SQLExecutionPlanStep:
     reason: str = ""
 
 
+@dataclass
+class SQLSourceSpec:
+    id: str
+    table: str
+    period_column: str
+    workdate_column: str
+    version_column: str
+    default_filters: List[str] = field(default_factory=list)
+    latest_snapshot_rule: str = ""
+
+
+@dataclass
+class SQLMetricSpec:
+    id: str
+    aliases: List[str]
+    source: str
+    value_column: str
+    unit: str = "MEQ"
+
+
+@dataclass
+class SQLQueryFamilySpec:
+    id: str
+    source: str
+    description: str = ""
+
+
 _SQL_REGISTRY_CACHE: List[SQLRegistryItem] = []
 _SQL_REGISTRY_MTIME: float = -1.0
 _LAST_SQL_NLU_TRACE: Dict[str, Any] = {}
 _SQL_INTENT_LLM_CLASSIFIER: Optional[Callable[[str, Dict[str, Any]], Optional[Dict[str, Any]]]] = None
+_SQL_SOURCES: Dict[str, SQLSourceSpec] = {}
+_SQL_METRICS: Dict[str, SQLMetricSpec] = {}
+_SQL_QUERY_FAMILIES: Dict[str, SQLQueryFamilySpec] = {}
+_SQL_METRIC_ALIAS_MAP: Dict[str, str] = {}
 
 
 _STOPWORDS = {
@@ -77,7 +108,9 @@ _STOPWORDS = {
 }
 
 _METRIC_WORDS = {
-    "sales": ["판매", "판매량", "매출", "실적", "수량", "출하"],
+    "sales": ["판매", "판매량", "매출", "실적", "수량", "출하", "sales"],
+    "net_prod": ["순생산", "생산", "net production", "net_prod"],
+    "net_ipgo": ["순입고", "입고", "net ipgo", "net_ipgo"],
 }
 
 _AGG_WORDS = {
@@ -110,7 +143,7 @@ _PERIOD_RELATIVE_WORDS = {
     "prev_quarter": ["전분기", "지난분기", "전 분기"],
 }
 
-_INTENT_VALUES = {"sales_total", "sales_trend", "sales_grouped", "sales_compare"}
+_INTENT_VALUES = {"sales_total", "sales_trend", "sales_grouped", "sales_compare", "metric_compare_versions"}
 
 
 def configure_sql_intent_llm_classifier(
@@ -156,9 +189,85 @@ def _as_result_spec(raw: Dict[str, Any]) -> SQLResultSpec:
     )
 
 
+def _parse_semantic_sections(data: Dict[str, Any]) -> None:
+    global _SQL_SOURCES, _SQL_METRICS, _SQL_QUERY_FAMILIES, _SQL_METRIC_ALIAS_MAP
+
+    sources_raw = data.get("sources") if isinstance(data, dict) else {}
+    metrics_raw = data.get("metrics") if isinstance(data, dict) else {}
+    families_raw = data.get("query_families") if isinstance(data, dict) else {}
+
+    sources: Dict[str, SQLSourceSpec] = {}
+    metrics: Dict[str, SQLMetricSpec] = {}
+    families: Dict[str, SQLQueryFamilySpec] = {}
+    alias_map: Dict[str, str] = {}
+
+    if isinstance(sources_raw, dict):
+        for sid, spec in sources_raw.items():
+            if not isinstance(spec, dict):
+                continue
+            source_id = str(sid or "").strip()
+            table = str(spec.get("table") or "").strip()
+            period_column = str(spec.get("period_column") or "YEARMONTH").strip()
+            workdate_column = str(spec.get("workdate_column") or "WORKDATE").strip()
+            version_column = str(spec.get("version_column") or "VERSION").strip()
+            if not source_id or not table:
+                continue
+            sources[source_id] = SQLSourceSpec(
+                id=source_id,
+                table=table,
+                period_column=period_column,
+                workdate_column=workdate_column,
+                version_column=version_column,
+                default_filters=[str(x).strip() for x in (spec.get("default_filters") or []) if str(x).strip()],
+                latest_snapshot_rule=str(spec.get("latest_snapshot_rule") or "").strip(),
+            )
+
+    if isinstance(metrics_raw, dict):
+        for mid, spec in metrics_raw.items():
+            if not isinstance(spec, dict):
+                continue
+            metric_id = str(mid or "").strip()
+            source = str(spec.get("source") or "").strip()
+            value_column = str(spec.get("value_column") or "").strip()
+            if not metric_id or not source or not value_column:
+                continue
+            aliases = [str(x).strip().lower() for x in (spec.get("aliases") or []) if str(x).strip()]
+            metric = SQLMetricSpec(
+                id=metric_id,
+                aliases=aliases,
+                source=source,
+                value_column=value_column,
+                unit=str(spec.get("unit") or "MEQ").strip() or "MEQ",
+            )
+            metrics[metric_id] = metric
+            alias_map[metric_id.lower()] = metric_id
+            for alias in aliases:
+                alias_map[alias] = metric_id
+
+    if isinstance(families_raw, dict):
+        for fid, spec in families_raw.items():
+            if not isinstance(spec, dict):
+                continue
+            family_id = str(fid or "").strip()
+            if not family_id:
+                continue
+            families[family_id] = SQLQueryFamilySpec(
+                id=family_id,
+                source=str(spec.get("source") or "").strip(),
+                description=str(spec.get("description") or "").strip(),
+            )
+
+    _SQL_SOURCES = sources
+    _SQL_METRICS = metrics
+    _SQL_QUERY_FAMILIES = families
+    _SQL_METRIC_ALIAS_MAP = alias_map
+
+
 def _load_registry_from_yaml(path: str) -> List[SQLRegistryItem]:
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
+
+    _parse_semantic_sections(data if isinstance(data, dict) else {})
 
     rows = data.get("queries") if isinstance(data, dict) else data
     if not isinstance(rows, list):
@@ -242,8 +351,12 @@ def get_sql_registry_item_by_id(query_id: str) -> Optional[SQLRegistryItem]:
 
 
 def _extract_metric(norm: str) -> str:
+    q = norm.lower()
+    for alias, metric_id in _SQL_METRIC_ALIAS_MAP.items():
+        if alias and alias in q:
+            return metric_id
     for metric, words in _METRIC_WORDS.items():
-        if _contains_any(norm, words):
+        if _contains_any(q, words):
             return metric
     return ""
 
@@ -316,7 +429,67 @@ def _extract_compare(norm: str) -> str:
     for key, words in _COMPARE_WORDS.items():
         if any(w.replace(" ", "") in compact for w in words):
             return key
+    if any(x in compact for x in ("비교", "차이", "대비", "vs", "versus")):
+        return "compare_versions"
+    if "와" in compact or "과" in compact:
+        return "compare_versions"
     return ""
+
+
+def _extract_versions(question: str, norm: str) -> List[str]:
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{0,12}", question or "")
+    stop = {
+        "SQL", "VERSION", "SALES", "SUM", "AVG", "MAX", "MIN", "COUNT",
+        "MONTH", "YEAR", "QUARTER", "THIS", "LAST", "RECENT", "VS", "AND",
+        "NET", "PRODUCTION", "IPGO", "COMPARE", "ANALYSIS",
+    }
+
+    versions: List[str] = []
+    for tok in tokens:
+        up = tok.upper()
+        if up in stop:
+            continue
+        if re.fullmatch(r"20\d{2}", up):
+            continue
+        if re.fullmatch(r"[A-Z]{1,4}", up) or re.fullmatch(r"[A-Z]{1,3}\d{1,2}", up):
+            if up not in versions:
+                versions.append(up)
+
+    compact = re.sub(r"\s+", " ", norm.lower()).strip()
+    m = re.findall(r"\b(vh|vl|wc)\b", compact, flags=re.IGNORECASE)
+    for tok in m:
+        up = tok.upper()
+        if up not in versions:
+            versions.append(up)
+    return versions
+
+
+def resolve_metric(question: str, slots: Dict[str, Any]) -> str:
+    metric = str((slots or {}).get("metric") or "").strip().lower()
+    if metric in _SQL_METRICS:
+        return metric
+    if metric in _SQL_METRIC_ALIAS_MAP:
+        return _SQL_METRIC_ALIAS_MAP[metric]
+    return _extract_metric(normalize_question(question))
+
+
+def resolve_versions(question: str, slots: Dict[str, Any]) -> List[str]:
+    versions = [str(x).strip().upper() for x in ((slots or {}).get("versions") or []) if str(x).strip()]
+    if not versions:
+        versions = _extract_versions(question, normalize_question(question))
+    single = str((slots or {}).get("version") or "").strip().upper()
+    if single and single not in versions:
+        versions.append(single)
+    uniq: List[str] = []
+    for v in versions:
+        if v and v not in uniq:
+            uniq.append(v)
+    return uniq
+
+
+def resolve_source_for_metric(metric: str) -> str:
+    spec = _SQL_METRICS.get(str(metric or ""))
+    return str(spec.source) if spec else ""
 
 
 def _extract_version(question: str, norm: str) -> str:
@@ -357,11 +530,15 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
     compare = _extract_compare(norm)
     trend = any(w in norm for w in _TREND_WORDS)
     version = _extract_version(question, norm)
+    versions = _extract_versions(question, norm)
+    analysis = any(x in norm for x in ("분석", "해석", "비교 분석", "비교분석"))
 
     if trend and not dimension:
         dimension = "month"
     if "버전별" in norm.replace(" ", ""):
         dimension = "version"
+    if version and version not in versions:
+        versions.append(version)
 
     if compare:
         if not period_value or period_value in ("prev_quarter", "last_month", "last_year"):
@@ -379,7 +556,10 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
         "period_value": period_value,
         "dimension": dimension,
         "version": version,
+        "versions": versions,
         "compare": compare,
+        "compare_flag": bool(compare),
+        "analysis": analysis,
         "trend": trend,
     }
     return slots
@@ -387,16 +567,23 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
 
 def classify_intent_rule_based(question: str, slots: Dict[str, Any]) -> Tuple[str, bool, List[str]]:
     norm = normalize_question(question)
+    versions = resolve_versions(question, slots)
+    metric = resolve_metric(question, slots) or "sales"
+    compare_token = str(slots.get("compare") or "")
+    compare_requested = bool(compare_token) or len(versions) >= 2
 
     scores = {
         "sales_total": 0.4,
         "sales_trend": 0.0,
         "sales_grouped": 0.0,
         "sales_compare": 0.0,
+        "metric_compare_versions": 0.0,
     }
 
     if slots.get("compare"):
         scores["sales_compare"] += 2.2
+    if compare_requested and len(versions) >= 2 and metric in ("sales", "net_prod", "net_ipgo"):
+        scores["metric_compare_versions"] += 3.0
     if slots.get("trend"):
         scores["sales_trend"] += 2.2
     if slots.get("dimension") in ("version", "month", "quarter"):
@@ -414,6 +601,8 @@ def classify_intent_rule_based(question: str, slots: Dict[str, Any]) -> Tuple[st
     reasons: List[str] = []
     if slots.get("compare"):
         reasons.append("compare keyword")
+    if len(versions) >= 2:
+        reasons.append("multi-version detected")
     if slots.get("trend"):
         reasons.append("trend keyword")
     if slots.get("dimension"):
@@ -422,7 +611,7 @@ def classify_intent_rule_based(question: str, slots: Dict[str, Any]) -> Tuple[st
     ambiguous = gap < 0.75
     if intent == "sales_grouped" and not slots.get("dimension"):
         ambiguous = True
-    if not slots.get("period_value") and not slots.get("version") and not slots.get("dimension"):
+    if not slots.get("period_value") and not slots.get("version") and not slots.get("dimension") and len(versions) < 2:
         ambiguous = True
 
     return intent, ambiguous, reasons
@@ -456,6 +645,11 @@ def infer_default_period(intent: str, slots: Dict[str, Any], question: str) -> T
             merged["compare"] = "prev_quarter"
         reason = "기준 기간이 없어 이번 분기 대비 전분기로 해석했습니다."
         inferred = True
+    elif intent == "metric_compare_versions":
+        merged["period_type"] = "month"
+        merged["period_value"] = "this_month"
+        reason = "기간 지정이 없어 이번달 기준으로 버전 비교를 조회했습니다."
+        inferred = True
 
     if not inferred and any(x in norm for x in ("어때", "흐름", "추이")) and not merged.get("period_value"):
         merged["period_type"] = "relative"
@@ -474,7 +668,8 @@ def _sanitize_slots(raw_slots: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     allowed_keys = {
         "metric", "aggregation", "period_type", "period_value",
-        "dimension", "version", "compare", "trend",
+        "dimension", "version", "versions", "compare", "compare_flag", "analysis", "trend",
+        "metric_unit", "source_name",
     }
     for k, v in raw_slots.items():
         kk = str(k).strip().lower()
@@ -522,6 +717,119 @@ def _maybe_classify_with_llm(question: str, trace: Dict[str, Any]) -> Tuple[str,
     except Exception as e:
         trace["llm_intent_error"] = str(e)
         return rule_intent, slots, True, True
+
+
+def _safe_identifier(name: str) -> str:
+    value = str(name or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError(f"invalid identifier: {name}")
+    return value
+
+
+def select_query_family(intent: str, slots: Dict[str, Any], metric: str) -> str:
+    if intent == "metric_compare_versions" and len(slots.get("versions") or []) >= 2:
+        return "compare_versions_same_period"
+    if intent == "sales_trend":
+        return "trend_monthly"
+    if intent == "sales_grouped":
+        return "grouped_by_version_same_period"
+    if intent == "sales_total":
+        return "total_single_version_same_period"
+    return ""
+
+
+def _build_default_filter_sql(default_filters: List[str]) -> str:
+    if not default_filters:
+        return ""
+    return "".join([f" AND {flt}" for flt in default_filters if flt])
+
+
+def build_compare_plan(metric: str, versions: List[str], period: Dict[str, Any]) -> Optional[SQLRegistryMatch]:
+    metric_spec = _SQL_METRICS.get(metric)
+    if metric_spec is None or len(versions) < 2:
+        return None
+
+    source_spec = _SQL_SOURCES.get(metric_spec.source)
+    if source_spec is None:
+        return None
+
+    table = _safe_identifier(source_spec.table)
+    period_column = _safe_identifier(source_spec.period_column)
+    workdate_column = _safe_identifier(source_spec.workdate_column)
+    version_column = _safe_identifier(source_spec.version_column)
+    value_column = _safe_identifier(metric_spec.value_column)
+
+    binds: List[str] = []
+    params: Dict[str, SQLParamSpec] = {
+        "start_yyyymm": SQLParamSpec(type="yyyymm", required=True, aliases=["시작월"]),
+        "end_yyyymm": SQLParamSpec(type="yyyymm", required=True, aliases=["종료월"]),
+    }
+    for idx, _ in enumerate(versions, start=1):
+        key = f"v{idx}"
+        binds.append(f":{key}")
+        params[key] = SQLParamSpec(type="string", required=True, aliases=[key])
+
+    default_filter_sql = _build_default_filter_sql(source_spec.default_filters)
+    if source_spec.latest_snapshot_rule:
+        latest_rule = source_spec.latest_snapshot_rule.format(
+            table=table,
+            period_column=period_column,
+            workdate_column=workdate_column,
+            default_filter_sql=default_filter_sql,
+        )
+    else:
+        latest_rule = (
+            f"{workdate_column} = (SELECT MAX({workdate_column}) FROM {table} "
+            f"WHERE {period_column} BETWEEN :start_yyyymm AND :end_yyyymm{default_filter_sql})"
+        )
+
+    sql = f"""
+SELECT
+  UPPER({version_column}) AS VERSION,
+  NVL(SUM({value_column}), 0) AS VALUE
+FROM {table}
+WHERE 1=1
+  AND {latest_rule}
+  {default_filter_sql}
+  AND {period_column} BETWEEN :start_yyyymm AND :end_yyyymm
+  AND UPPER({version_column}) IN ({", ".join(binds)})
+GROUP BY UPPER({version_column})
+ORDER BY UPPER({version_column})
+""".strip()
+
+    item = SQLRegistryItem(
+        id="compare_versions_same_period",
+        description=f"{metric} versions compare",
+        sql=sql,
+        params=params,
+        result=SQLResultSpec(mode="table", field="", empty_message="비교 대상 데이터가 없습니다."),
+        keywords=[],
+        patterns=[],
+        intent="metric_compare_versions",
+        supported_slots=["metric", "versions", "period_type", "period_value", "compare", "analysis"],
+        default_aggregation="sum",
+        supports_compare=True,
+        supports_trend=False,
+        groupable_dimensions=["version"],
+        deprecated=False,
+    )
+    slots = {
+        "metric": metric,
+        "versions": versions,
+        "compare": True,
+        "analysis": bool(period.get("analysis") if isinstance(period, dict) else False),
+        "metric_unit": metric_spec.unit,
+        "source_name": source_spec.id,
+    }
+    return SQLRegistryMatch(
+        item=item,
+        score=20.0,
+        intent="metric_compare_versions",
+        slots=slots,
+        period=dict(period or {}),
+        llm_used=False,
+        fallback_used=False,
+    )
 
 
 def _score_item(question_norm: str, item: SQLRegistryItem) -> float:
@@ -619,6 +927,19 @@ def build_match_for_query_id(
 ) -> Optional[SQLRegistryMatch]:
     item = get_sql_registry_item_by_id(query_id)
     if item is None:
+        if str(query_id or "") == "compare_versions_same_period":
+            metric = str((slots or {}).get("metric") or "sales")
+            versions = [str(x).strip().upper() for x in ((slots or {}).get("versions") or []) if str(x).strip()]
+            dynamic = build_compare_plan(metric, versions, period)
+            if dynamic is None:
+                return None
+            dynamic.intent = intent
+            dynamic.slots = dict(slots or {})
+            dynamic.period = dict(period or {})
+            dynamic.llm_used = llm_used
+            dynamic.fallback_used = fallback_used
+            dynamic.score = score
+            return dynamic
         return None
     return SQLRegistryMatch(
         item=item,
@@ -644,6 +965,8 @@ def build_execution_plan(question: str, intent: str, slots: Dict[str, Any], sele
             primary = "sales_grouped_by_version"
         elif intent == "sales_compare":
             primary = "sales_compare_periods"
+        elif intent == "metric_compare_versions":
+            primary = "compare_versions_same_period"
 
     if primary:
         plan.append(SQLExecutionPlanStep(query_id=primary, role="primary", reason="intent-primary"))
@@ -670,6 +993,8 @@ def build_execution_plan(question: str, intent: str, slots: Dict[str, Any], sele
 
 
 def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    # ensure semantic sections(sources/metrics/query_families) are loaded
+    get_sql_registry_items()
     norm = normalize_question(question)
     slots = extract_slots_rule_based(question, now=now)
     rule_intent, ambiguous, reasons = classify_intent_rule_based(question, slots)
@@ -687,6 +1012,14 @@ def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Di
     final_intent, merged_slots, llm_used, fallback_used = _maybe_classify_with_llm(question, trace)
     trace["llm_used"] = llm_used
     trace["fallback_used"] = fallback_used
+    merged_slots["metric"] = resolve_metric(question, merged_slots) or "sales"
+    metric_spec = _SQL_METRICS.get(str(merged_slots["metric"]))
+    if metric_spec:
+        merged_slots["metric_unit"] = metric_spec.unit
+        merged_slots["source_name"] = metric_spec.source
+    merged_slots["versions"] = resolve_versions(question, merged_slots)
+    if len(merged_slots.get("versions") or []) >= 2:
+        merged_slots["compare"] = True
     merged_slots, period_inferred, period_infer_reason = infer_default_period(final_intent, merged_slots, question)
     trace["period_inferred"] = period_inferred
     trace["period_infer_reason"] = period_infer_reason
@@ -703,6 +1036,28 @@ def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Di
         "compare_start_yyyymm": period.compare_start_yyyymm,
         "compare_end_yyyymm": period.compare_end_yyyymm,
     }
+
+    family_id = select_query_family(final_intent, merged_slots, str(merged_slots.get("metric") or "sales"))
+    if family_id == "compare_versions_same_period":
+        compare_match = build_compare_plan(
+            str(merged_slots.get("metric") or "sales"),
+            list(merged_slots.get("versions") or []),
+            {
+                **trace["resolved_period"],
+                "analysis": bool(merged_slots.get("analysis")),
+            },
+        )
+        if compare_match is not None:
+            compare_match.slots = dict(merged_slots)
+            compare_match.period = dict(trace["resolved_period"])
+            compare_match.llm_used = llm_used
+            compare_match.fallback_used = fallback_used
+            trace["selected_query_id"] = compare_match.item.id
+            trace["final_intent"] = final_intent
+            trace["final_slots"] = merged_slots
+            trace["match_score"] = compare_match.score
+            trace["match"] = compare_match
+            return trace
 
     selected = _select_query_template(final_intent, merged_slots, norm)
     if selected is None:
@@ -789,10 +1144,15 @@ def _fill_semantic_params(
     slots: Dict[str, Any],
     period: PeriodResolution,
 ) -> None:
+    versions = [str(x).strip().upper() for x in (slots.get("versions") or []) if str(x).strip()]
     for pname in item.params.keys():
         key = pname.lower()
         if key in ("version", "ver") and slots.get("version"):
             result[pname] = str(slots.get("version") or "").upper()
+        elif re.fullmatch(r"v\d+", key) and versions:
+            idx = int(key[1:]) - 1
+            if 0 <= idx < len(versions):
+                result[pname] = versions[idx]
         elif key in ("yearmonth", "yyyymm", "anchor_yyyymm"):
             result[pname] = period.anchor_yyyymm
         elif key in ("start_yyyymm", "from_yyyymm", "start_ym"):
