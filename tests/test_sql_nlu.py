@@ -178,6 +178,7 @@ class SqlNluTest(unittest.TestCase):
             ],
             period_infer_reason=tr.get("period_infer_reason") or "",
         )
+        self.assertIn("기준 기간: 2026년 2월", answer)
         self.assertIn("해석 기간: 2026년 2월", answer)
         self.assertIn("질문 표현: 2월", answer)
 

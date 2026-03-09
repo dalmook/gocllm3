@@ -130,6 +130,21 @@ def _build_resolved_period_line(period: Dict[str, Any]) -> str:
     return line
 
 
+def _build_exact_period_label(period: Dict[str, Any]) -> str:
+    if not isinstance(period, dict) or not period:
+        return ""
+
+    start = str(period.get("start_yyyymm") or "")
+    end = str(period.get("end_yyyymm") or "")
+    if not start and not end:
+        return str(period.get("label") or "")
+    if start and end:
+        if start == end:
+            return _format_yyyymm_korean(start)
+        return f"{_format_yyyymm_korean(start)}~{_format_yyyymm_korean(end)}"
+    return str(period.get("label") or "")
+
+
 def render_compare_versions_answer(
     *,
     rows: List[Dict[str, Any]],
@@ -568,7 +583,7 @@ def render_answer_rule_based(
     metric = str(slots.get("metric") or "sales")
     unit = str(slots.get("metric_unit") or "MEQ")
     source_name = str(slots.get("source_name") or "psi_simul")
-    period_label = str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
+    period_label = _build_exact_period_label(period) or str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
     resolved_period_line = _build_resolved_period_line(period)
     filter_text = _format_filters(dict(slots.get("filters") or {}))
     family = str(slots.get("family") or "")
@@ -632,7 +647,7 @@ def render_answer_rule_based(
         data_lines.append(f"- 증감: {_format_number(c['diff'])}")
     elif intent == "sales_trend":
         peaks = _top_months(primary_rows, top_n=2)
-        summary = f"{period.get('label') or '지정 기간'} 판매 추이를 조회했습니다."
+        summary = f"{period_label or '지정 기간'} 판매 추이를 조회했습니다."
         if peaks:
             data_lines.append(f"- 상위 월: {', '.join(peaks)}")
         aux = by_role.get("aux")
@@ -647,7 +662,7 @@ def render_answer_rule_based(
             ver = str(r.get("VERSION") or r.get("version") or "-")
             sales = r.get("sales") if "sales" in r else r.get("SALES")
             top.append(f"{ver} {_format_number(sales)}")
-        summary = f"{period.get('label') or '지정 기간'} 버전별 판매량을 조회했습니다."
+        summary = f"{period_label or '지정 기간'} 버전별 판매량을 조회했습니다."
         if top:
             data_lines.append(f"- 상위 버전: {', '.join(top)}")
     else:
@@ -667,7 +682,7 @@ def render_answer_rule_based(
                 total = 0.0
             version = str(slots.get("version") or "전체")
             prefix = f"{filter_text} 기준 " if filter_text else ""
-            summary = f"{prefix}{period.get('label') or '지정 기간'} {version} 누적 판매량은 {_format_number(total)}입니다."
+            summary = f"{prefix}{period_label or '지정 기간'} {version} 누적 판매량은 {_format_number(total)}입니다."
             data_lines.append(f"- 누적 판매량: {_format_number(total)}")
             aux = by_role.get("aux")
             if aux:
@@ -682,7 +697,7 @@ def render_answer_rule_based(
     agg_map = {"sum": "합계", "avg": "평균", "max": "최대", "min": "최소", "count": "건수"}
     dim = str(slots.get("dimension") or "-")
     version = str(slots.get("version") or "전체")
-    period_label = str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
+    period_label = _build_exact_period_label(period) or str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
 
     lines = [
         "📌 한줄 요약",
@@ -705,7 +720,8 @@ def build_sql_render_prompt(payload: Dict[str, Any]) -> str:
     return (
         "다음 structured 결과를 바탕으로 한국어 답변을 작성하세요. SQL 작성 금지. "
         "반드시 섹션 3개(한줄 요약, 데이터 기반 답변, 해석 기준)로 답하세요. "
-        "해석 기준 섹션에는 resolved_period_line이 있으면 그대로 반영해 질문의 기간 표현과 실제 적용 기간을 명확히 드러내세요.\n"
+        "해석 기준 섹션의 기준 기간은 반드시 exact_period_label 값을 사용하세요. "
+        "resolved_period_line이 있으면 그대로 반영해 질문의 기간 표현과 실제 적용 기간을 명확히 드러내세요.\n"
         f"INPUT={json.dumps(payload, ensure_ascii=False)}"
     )
 
@@ -733,6 +749,7 @@ def render_answer_with_llm(
         "intent": intent,
         "slots": slots,
         "period": period,
+        "exact_period_label": _build_exact_period_label(period),
         "resolved_period_line": _build_resolved_period_line(period),
         "period_infer_reason": period_infer_reason,
         "result_rows": [
