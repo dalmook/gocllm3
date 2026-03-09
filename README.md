@@ -24,6 +24,15 @@
 - `rag_only`: 기존 RAG 흐름
 - `hybrid`: SQL + RAG 결합
 
+## 1단계 Prefix 정책 (운영 안정화)
+- SQL 조회는 `/sql ...` 입력일 때만 수행합니다.
+- 용어(Glossary) 조회는 `/용어 ...` 입력일 때만 수행합니다.
+- 일반 문장은 자동 SQL/자동 용어 매칭을 하지 않고 기존 RAG/일반 LLM 흐름으로 처리합니다.
+
+예시:
+- `/sql 2월 버전 vh 판매 몇개야`
+- `/용어 hbm`
+
 ## Oracle 연결 정책
 - 드라이버: `python-oracledb` (Thin 금지)
 - Thick mode 1회 초기화: `oracledb.init_oracle_client(lib_dir=r"c:\instantclient")`

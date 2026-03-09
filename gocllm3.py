@@ -1686,6 +1686,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
     chat_type = (task.get("chat_type") or "").upper()
     scope_id = str(task.get("scope_id") or chatroom_id)
     question = (task.get("question") or "").strip()
+    force_mode = (task.get("force_mode") or "").strip().lower()
+    force_sql_mode = force_mode == "sql"
+    force_glossary_mode = force_mode == "glossary"
     sender_knox = task.get("sender_knox") or ""
     stats = {
         "rag_calls": 0,
@@ -1716,32 +1719,59 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[MEMORY] hit={memory_hit} message_count={len(memory_messages)} prompt_chars={memory_chars} use_in_rewrite={use_memory_for_rewrite}")
         perf["memory_ms"] = (time.perf_counter() - perf["t0"]) * 1000
 
-        prefer_general = should_prefer_general_llm(question)
+        prefer_general = should_prefer_general_llm(question) and not (force_sql_mode or force_glossary_mode)
         time_range = _extract_time_range_from_question(question)
         effective_question, ctx_state = _build_effective_question(question, scope_id=scope_id, time_range=time_range)
         issue_summary_intent = is_issue_summary_intent(effective_question)
 
         normalized_query = normalize_query_for_search(effective_question)
-        glossary_intent = is_glossary_intent(effective_question)
-        force_glossary = is_force_glossary_query(effective_question)
-        sql_match = find_best_sql_registry_match(effective_question)
+        glossary_intent = is_glossary_intent(effective_question) if force_glossary_mode else False
+        force_glossary = force_glossary_mode
+        sql_match = find_best_sql_registry_match(effective_question) if force_sql_mode else None
         if sql_match:
             print(f"[SQL_REGISTRY] matched={sql_match.item.id} score={sql_match.score:.2f}")
         else:
             print("[SQL_REGISTRY] matched=None")
-        final_intent = classify_query_intent(
-            question,
-            effective_question,
-            sql_match,
-            prefer_general=prefer_general,
-            issue_summary_intent=issue_summary_intent,
-            glossary_intent=glossary_intent,
+        if force_sql_mode:
+            final_intent = "data_only"
+        elif force_glossary_mode:
+            final_intent = "rag_only"
+        else:
+            final_intent = classify_query_intent(
+                question,
+                effective_question,
+                sql_match,
+                prefer_general=prefer_general,
+                issue_summary_intent=issue_summary_intent,
+                glossary_intent=glossary_intent,
+            )
+        print(
+            f"[INTENT] force_mode={force_mode or 'none'} "
+            f"sql_match={(sql_match.item.id if sql_match else 'none')} final={final_intent}"
         )
-        print(f"[INTENT] sql_match={(sql_match.item.id if sql_match else 'none')} final={final_intent}")
         route = build_route_decision(final_intent, sql_match)
         sql_summary = None
         sql_summary_text = ""
         sql_used = False
+
+        if force_sql_mode and not sql_match:
+            answer = (
+                "📌 한줄 요약\n"
+                "- /sql 질문으로 처리했지만 매칭 가능한 SQL 템플릿을 찾지 못했습니다.\n\n"
+                "💡 참고\n"
+                "- 현재 /sql은 등록된 SQL registry 항목만 실행합니다.\n"
+                "- 예: /sql 2월 버전 vh 판매 몇개야"
+            )
+            chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
+            save_conversation_memory(
+                scope_id=scope_id,
+                room_id=str(chatroom_id),
+                user_id=sender_knox,
+                role="assistant",
+                content=answer,
+                chat_type=chat_type,
+            )
+            return stats
 
         if route.use_sql and sql_match:
             sql_exec = execute_sql_match(sql_match, question=effective_question, runners=RUNNERS, run_oracle_query=run_oracle_query)
@@ -2235,6 +2265,14 @@ def parse_action_payload(info: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         return "WARN_RUN", {}
     if txt.startswith("/issue"):
         return "ISSUE_FORM", {}
+    if txt.startswith("/sql "):
+        return "LLM_CHAT", {"question": txt[5:].strip(), "force_mode": "sql"}
+    if txt == "/sql":
+        return "LLM_CHAT", {"question": "", "force_mode": "sql"}
+    if txt.startswith("/용어 "):
+        return "LLM_CHAT", {"question": txt[4:].strip(), "force_mode": "glossary"}
+    if txt == "/용어":
+        return "LLM_CHAT", {"question": "", "force_mode": "glossary"}
 
     # 5) LLM 라우팅
     if chat_type == "SINGLE":
@@ -3174,6 +3212,13 @@ async def post_message(request: Request):
                 return {"ok": True}
 
             question = (payload.get("question") or "").strip()
+            force_mode = (payload.get("force_mode") or "").strip().lower()
+            if not question and force_mode == "sql":
+                chatBot.send_text(chatroom_id, "사용법: /sql 질문내용  (예: /sql 2월 vh 판매 몇개야)")
+                return {"ok": True}
+            if not question and force_mode == "glossary":
+                chatBot.send_text(chatroom_id, "사용법: /용어 단어  (예: /용어 hbm)")
+                return {"ok": True}
             if not question:
                 chatBot.send_text(chatroom_id, "질문 내용이 비어있습니다. /ask 질문내용 또는 질문:내용 형식으로 입력해주세요.")
                 return {"ok": True}
@@ -3207,6 +3252,7 @@ async def post_message(request: Request):
                     "chat_type": chat_type,
                     "scope_id": scope_id,
                     "question": question,
+                    "force_mode": force_mode,
                     "requested_at": time.time(),
                     "request_id": request_id,
                 }
