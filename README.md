@@ -10,6 +10,7 @@
 - `app/sql_registry.py`: 자연어 질문용 SQL registry 매칭
 - `app/sql_period.py`: 자연어 기간(올해/전분기/최근 N개월 등) 표준화 유틸
 - `app/sql_registry.yaml`: `/sql` 전용 SQL 템플릿 등록 파일
+- `app/sql_answering.py`: `/sql` 다중 SQL 실행결과를 사용자 답변으로 렌더링
 - `app/query_intent.py`: 질문 의도 분류(`general_llm`, `data_only`, `rag_only`, `hybrid`)
 - `app/hybrid_router.py`: intent별 SQL 실행 여부/실행 래퍼
 - `app/hybrid_answer.py`: data/hybrid 답변 포맷 생성
@@ -33,11 +34,12 @@
   metric / aggregation / period / version / dimension / compare / trend
 3. `classify_intent_rule_based(question, slots)`
 4. 모호할 때만 `classify_sql_intent_with_llm` 보조 판별(JSON only)
-5. `resolve_period(slots)`으로 `start_yyyymm/end_yyyymm` 계산
-6. `select_query_template(intent, slots)`로 YAML 템플릿 선택
-7. `build_safe_sql_params(slots)`로 바인딩 파라미터 생성
-8. `execute_registered_sql(query_id, params)`
-9. `render_answer(result, slots, intent)` (기준 조건 포함)
+5. `infer_default_period(intent, slots, question)`으로 기간 미지정 보정
+6. `resolve_period(slots)`으로 `start_yyyymm/end_yyyymm` 계산
+7. `select_query_template(intent, slots)`로 YAML 템플릿 선택
+8. `build_execution_plan(question, intent, slots)`로 primary/aux SQL 계획 생성
+9. `execute_registered_sql(query_id, params)` (등록 템플릿만 실행)
+10. `render_answer_rule_based()` 후 필요 시 `render_answer_with_llm()` 보조
 
 ## 1단계 Prefix 정책 (운영 안정화)
 - SQL 조회는 `/sql ...` 입력일 때만 수행합니다.
@@ -84,6 +86,13 @@ queries:
 - `supports_trend`: 추이형 질문 지원 여부
 - `groupable_dimensions`: 허용 차원(예: `version`, `month`)
 
+대표 query id:
+- `sales_total_month`
+- `sales_total_period_range`
+- `sales_trend_monthly`
+- `sales_grouped_by_version`
+- `sales_compare_periods`
+
 질문 예시:
 - `/sql 2월 vh 판매 몇개야`
 - `/sql 버전 vh 202602 판매량`
@@ -109,7 +118,9 @@ queries:
 - `[ORACLE]`
 - `[SQL_REGISTRY]`
 - `[SQL_NLU]`
+- `[SQL_PLAN]`
 - `[SQL_DEBUG]`
+- `[SQL_ANSWER]`
 - `[INTENT]`
 - `[SQL_EXEC]`
 - `[SQL_RESULT]`

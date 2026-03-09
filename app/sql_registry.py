@@ -58,6 +58,13 @@ class SQLRegistryMatch:
     fallback_used: bool = False
 
 
+@dataclass
+class SQLExecutionPlanStep:
+    query_id: str
+    role: str = "primary"
+    reason: str = ""
+
+
 _SQL_REGISTRY_CACHE: List[SQLRegistryItem] = []
 _SQL_REGISTRY_MTIME: float = -1.0
 _LAST_SQL_NLU_TRACE: Dict[str, Any] = {}
@@ -222,6 +229,16 @@ def get_sql_registry_items() -> List[SQLRegistryItem]:
     except Exception as e:
         print(f"[SQL_REGISTRY] load failed: {e}")
         return _SQL_REGISTRY_CACHE
+
+
+def get_sql_registry_item_by_id(query_id: str) -> Optional[SQLRegistryItem]:
+    qid = str(query_id or "").strip().lower()
+    if not qid:
+        return None
+    for item in get_sql_registry_items():
+        if item.id.lower() == qid:
+            return item
+    return None
 
 
 def _extract_metric(norm: str) -> str:
@@ -411,6 +428,46 @@ def classify_intent_rule_based(question: str, slots: Dict[str, Any]) -> Tuple[st
     return intent, ambiguous, reasons
 
 
+def infer_default_period(intent: str, slots: Dict[str, Any], question: str) -> Tuple[Dict[str, Any], bool, str]:
+    merged = dict(slots or {})
+    if merged.get("period_value"):
+        return merged, False, ""
+
+    norm = normalize_question(question)
+    reason = ""
+    inferred = False
+
+    if intent in ("sales_total", "sales_grouped"):
+        merged["period_type"] = "year"
+        merged["period_value"] = "this_year"
+        reason = "기간 지정이 없어 올해 누적 기준으로 조회했습니다."
+        inferred = True
+    elif intent == "sales_trend":
+        merged["period_type"] = "relative"
+        merged["period_value"] = "recent_3_months"
+        if not merged.get("dimension"):
+            merged["dimension"] = "month"
+        reason = "기간 지정이 없어 최근 3개월 추이로 해석했습니다."
+        inferred = True
+    elif intent == "sales_compare":
+        merged["period_type"] = "quarter"
+        merged["period_value"] = "this_quarter"
+        if not merged.get("compare"):
+            merged["compare"] = "prev_quarter"
+        reason = "기준 기간이 없어 이번 분기 대비 전분기로 해석했습니다."
+        inferred = True
+
+    if not inferred and any(x in norm for x in ("어때", "흐름", "추이")) and not merged.get("period_value"):
+        merged["period_type"] = "relative"
+        merged["period_value"] = "recent_3_months"
+        if not merged.get("dimension"):
+            merged["dimension"] = "month"
+        reason = "기간 지정이 없어 최근 3개월 추이로 해석했습니다."
+        inferred = True
+
+    return merged, inferred, reason
+
+
 def _sanitize_slots(raw_slots: Any) -> Dict[str, Any]:
     if not isinstance(raw_slots, dict):
         return {}
@@ -528,6 +585,18 @@ def _select_query_template(intent: str, slots: Dict[str, Any], question_norm: st
         if slots.get("version") and "version" in item.params:
             score += 0.4
 
+        period_type = str(slots.get("period_type") or "")
+        if item.id == "sales_total_month":
+            score += 0.9 if period_type == "month" else -0.8
+        if item.id == "sales_total_period_range":
+            score += 0.9 if period_type in ("year", "quarter", "relative", "") else -0.2
+        if item.id == "sales_trend_monthly":
+            score += 1.0 if slots.get("trend") else 0.0
+        if item.id == "sales_grouped_by_version":
+            score += 1.0 if str(slots.get("dimension") or "") == "version" else -0.5
+        if item.id == "sales_compare_periods":
+            score += 1.0 if slots.get("compare") else -0.5
+
         if score > 0:
             candidates.append((item, score))
 
@@ -536,6 +605,68 @@ def _select_query_template(intent: str, slots: Dict[str, Any], question_norm: st
 
     candidates.sort(key=lambda x: x[1], reverse=True)
     return SQLRegistryMatch(item=candidates[0][0], score=float(candidates[0][1]))
+
+
+def build_match_for_query_id(
+    query_id: str,
+    *,
+    slots: Dict[str, Any],
+    period: Dict[str, Any],
+    intent: str,
+    llm_used: bool = False,
+    fallback_used: bool = False,
+    score: float = 10.0,
+) -> Optional[SQLRegistryMatch]:
+    item = get_sql_registry_item_by_id(query_id)
+    if item is None:
+        return None
+    return SQLRegistryMatch(
+        item=item,
+        score=score,
+        intent=intent,
+        slots=dict(slots or {}),
+        period=dict(period or {}),
+        llm_used=llm_used,
+        fallback_used=fallback_used,
+    )
+
+
+def build_execution_plan(question: str, intent: str, slots: Dict[str, Any], selected_query_id: str) -> List[SQLExecutionPlanStep]:
+    plan: List[SQLExecutionPlanStep] = []
+    primary = selected_query_id or ""
+    if not primary:
+        if intent == "sales_total":
+            ptype = str(slots.get("period_type") or "")
+            primary = "sales_total_month" if ptype == "month" else "sales_total_period_range"
+        elif intent == "sales_trend":
+            primary = "sales_trend_monthly"
+        elif intent == "sales_grouped":
+            primary = "sales_grouped_by_version"
+        elif intent == "sales_compare":
+            primary = "sales_compare_periods"
+
+    if primary:
+        plan.append(SQLExecutionPlanStep(query_id=primary, role="primary", reason="intent-primary"))
+
+    qnorm = normalize_question(question)
+    if intent == "sales_total":
+        # 질문이 단순 합계일 때 요약 품질 향상을 위해 월별 breakdown 보조 조회
+        if slots.get("version") and not slots.get("trend") and "추이" not in qnorm:
+            plan.append(SQLExecutionPlanStep(query_id="sales_trend_monthly", role="aux", reason="breakdown-monthly"))
+    elif intent == "sales_trend":
+        # 추이 질문은 총합 요약 보조값도 함께 조회
+        ptype = str(slots.get("period_type") or "")
+        aux = "sales_total_month" if ptype == "month" else "sales_total_period_range"
+        plan.append(SQLExecutionPlanStep(query_id=aux, role="aux", reason="trend-total-summary"))
+
+    uniq: List[SQLExecutionPlanStep] = []
+    seen = set()
+    for step in plan:
+        if step.query_id in seen:
+            continue
+        seen.add(step.query_id)
+        uniq.append(step)
+    return uniq
 
 
 def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -556,6 +687,9 @@ def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Di
     final_intent, merged_slots, llm_used, fallback_used = _maybe_classify_with_llm(question, trace)
     trace["llm_used"] = llm_used
     trace["fallback_used"] = fallback_used
+    merged_slots, period_inferred, period_infer_reason = infer_default_period(final_intent, merged_slots, question)
+    trace["period_inferred"] = period_inferred
+    trace["period_infer_reason"] = period_infer_reason
 
     period = resolve_period_slots(merged_slots, now=now)
     trace["resolved_period"] = {

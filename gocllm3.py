@@ -30,6 +30,8 @@ import store
 import ui
 from app.oracle_db import init_oracle_thick_mode_once, run_oracle_query_compat, startup_initialize
 from app.sql_registry import (
+    build_execution_plan,
+    build_match_for_query_id,
     build_sql_intent_prompt,
     configure_sql_intent_llm_classifier,
     find_best_sql_registry_match,
@@ -43,6 +45,7 @@ from app.hybrid_answer import (
     build_hybrid_prompt,
     build_hybrid_fallback_answer,
 )
+from app.sql_answering import render_answer_rule_based, render_answer_with_llm
 
 from zoneinfo import ZoneInfo
 import holidays
@@ -161,6 +164,7 @@ LLM_ALLOWED_USERS_SQL = os.getenv(
     "SELECT SSO_ID FROM SCM_WP.T_T_FOR_MASTER A WHERE 1=1 and a.dept_name in ('공급망운영그룹(메모리)','SCM그룹(메모리)','운영전략그룹(메모리)','Global운영팀(메모리)') and A.DEPT_NAME LIKE '%메모리%' and a.POSITION_CODE is not null AND A.SSO_ID NOT IN ('SCM.RPA','SCM 봇','메모리STO2','메모리 STO','dalbong.chatbot01', 'dalbongbot01', 'dalbong.bot01', 'command.center', 'thatcoolguy')"
 )
 LLM_ALLOWED_USERS_CACHE_TTL_SEC = max(0, int(os.getenv("LLM_ALLOWED_USERS_CACHE_TTL_SEC", "1800")))
+SQL_ANSWER_LLM_ENABLE = os.getenv("SQL_ANSWER_LLM_ENABLE", "true").lower() == "true"
 
 # ✅ SINGLE(1:1) 단축키 → URL
 # ✅ SINGLE(1:1) 단축키(별칭 묶음) → URL
@@ -528,6 +532,28 @@ def classify_sql_intent_with_llm(llm, question: str, context: Dict[str, Any]) ->
         return obj
     except Exception as e:
         print(f"[SQL_NLU] llm classify failed: {e}")
+        return None
+
+
+def render_sql_answer_with_llm(llm, prompt: str) -> Optional[str]:
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    system_prompt = (
+        "당신은 SQL 조회 결과를 사용자 친화적으로 설명하는 도우미입니다. "
+        "SQL 생성/수정은 금지하며, 입력 구조를 근거로만 답변하세요."
+    )
+    try:
+        resp = llm_invoke_with_retry(
+            llm,
+            [SystemMessage(content=system_prompt), HumanMessage(content=prompt)],
+            attempts=2,
+            base_delay=0.8,
+        )
+        content = getattr(resp, "content", "") if resp is not None else ""
+        text = content if isinstance(content, str) else str(content)
+        return text.strip() if text else None
+    except Exception as e:
+        print(f"[SQL_ANSWER] llm render failed: {e}")
         return None
 
 # =========================
@@ -1772,6 +1798,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 print(f"[SQL_NLU] llm_intent_result={sql_nlu_trace.get('llm_intent_result')}")
             print(f"[SQL_NLU] selected_query_id={sql_nlu_trace.get('selected_query_id')}")
             print(f"[SQL_NLU] period={sql_nlu_trace.get('resolved_period')}")
+            print(f"[SQL_NLU] period_inferred={sql_nlu_trace.get('period_inferred')} reason={sql_nlu_trace.get('period_infer_reason')}")
             print(f"[SQL_NLU] fallback_used={sql_nlu_trace.get('fallback_used')}")
         if sql_match:
             print(f"[SQL_REGISTRY] matched={sql_match.item.id} score={sql_match.score:.2f}")
@@ -1819,32 +1846,115 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             return stats
 
         if route.use_sql and sql_match:
-            sql_exec = execute_sql_match(sql_match, question=effective_question, run_oracle_query=run_oracle_query)
-            sql_df = sql_exec.get("df")
-            sql_rows = len(sql_df.index) if isinstance(sql_df, pd.DataFrame) else 0
-            print(
-                f"[SQL_EXEC] runner={sql_exec.get('runner')} rows={sql_rows} "
-                f"elapsed_ms={sql_exec.get('elapsed_ms', 0)} ok={sql_exec.get('ok')}"
-            )
-            if sql_exec.get("ok"):
-                sql_used = True
-                sql_summary = summarize_sql_result(
-                    sql_exec["df"],
-                    result_mode=str(sql_exec.get("result_mode") or "table"),
-                    result_field=str(sql_exec.get("result_field") or ""),
-                    empty_message=str(sql_exec.get("empty_message") or "조회 결과가 없습니다."),
-                )
-                sql_summary_text = "\n".join(sql_summary.get("bullets") or [])
-                print(f"[SQL_RESULT] summary_chars={len(sql_summary_text)}")
-                if final_intent == "data_only":
-                    answer = build_data_only_answer(
-                        sql_summary,
-                        context={
-                            "intent": sql_exec.get("intent"),
-                            "slots": sql_exec.get("slots") or {},
-                            "period": sql_exec.get("period") or {},
-                        },
+            if force_sql_mode:
+                final_slots = (sql_nlu_trace.get("final_slots") or sql_match.slots or {}).copy()
+                final_sql_intent = str(sql_nlu_trace.get("final_intent") or sql_match.intent or "sales_total")
+                period_ctx = dict(sql_nlu_trace.get("resolved_period") or sql_match.period or {})
+                selected_qid = str(sql_nlu_trace.get("selected_query_id") or sql_match.item.id)
+                plan = build_execution_plan(effective_question, final_sql_intent, final_slots, selected_qid)
+                print(f"[SQL_PLAN] steps={[{'query_id': s.query_id, 'role': s.role, 'reason': s.reason} for s in plan]}")
+
+                execution_results: List[Dict[str, Any]] = []
+                primary_error = None
+                primary_missing: List[str] = []
+
+                for step in plan:
+                    step_match = build_match_for_query_id(
+                        step.query_id,
+                        slots=final_slots,
+                        period=period_ctx,
+                        intent=final_sql_intent,
+                        llm_used=bool(sql_nlu_trace.get("llm_used")),
+                        fallback_used=bool(sql_nlu_trace.get("fallback_used")),
                     )
+                    if step_match is None:
+                        print(f"[SQL_PLAN] skip missing_query_id={step.query_id}")
+                        continue
+
+                    step_exec = execute_sql_match(step_match, question=effective_question, run_oracle_query=run_oracle_query)
+                    step_df = step_exec.get("df")
+                    step_rows = len(step_df.index) if isinstance(step_df, pd.DataFrame) else 0
+                    print(
+                        f"[SQL_EXEC] query_id={step.query_id} role={step.role} rows={step_rows} "
+                        f"elapsed_ms={step_exec.get('elapsed_ms', 0)} ok={step_exec.get('ok')}"
+                    )
+
+                    if step_exec.get("ok"):
+                        execution_results.append(
+                            {
+                                "query_id": step.query_id,
+                                "role": step.role,
+                                "reason": step.reason,
+                                "df": step_exec.get("df"),
+                                "params": step_exec.get("params") or {},
+                                "result_mode": step_exec.get("result_mode"),
+                                "result_field": step_exec.get("result_field"),
+                            }
+                        )
+                    else:
+                        if step.role == "primary":
+                            primary_error = step_exec.get("error")
+                            primary_missing = step_exec.get("missing_params") or []
+                            break
+                        print(f"[SQL_PLAN] aux_failed query_id={step.query_id} error={step_exec.get('error')}")
+
+                if primary_error and not execution_results:
+                    if primary_missing:
+                        missing_line = ", ".join(primary_missing)
+                        answer = (
+                            "📌 한줄 요약\n"
+                            "- /sql 실행에 필요한 필수 파라미터가 부족합니다.\n\n"
+                            "💡 참고\n"
+                            f"- 누락 파라미터: {missing_line}\n"
+                            "- 가능한 범위에서 기본값 보정을 시도했지만 해석이 어려웠습니다."
+                        )
+                    else:
+                        answer = (
+                            "📌 한줄 요약\n"
+                            "- /sql 실행 중 오류가 발생했습니다.\n\n"
+                            "💡 참고\n"
+                            f"- 오류: {primary_error}"
+                        )
+                    chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
+                    save_conversation_memory(
+                        scope_id=scope_id,
+                        room_id=str(chatroom_id),
+                        user_id=sender_knox,
+                        role="assistant",
+                        content=answer,
+                        chat_type=chat_type,
+                    )
+                    return stats
+
+                if final_intent == "data_only":
+                    sql_used = True
+                    rule_answer = render_answer_rule_based(
+                        effective_question,
+                        intent=final_sql_intent,
+                        slots=final_slots,
+                        period=period_ctx,
+                        results=execution_results,
+                        period_infer_reason=str(sql_nlu_trace.get("period_infer_reason") or ""),
+                    )
+                    answer = rule_answer
+                    if SQL_ANSWER_LLM_ENABLE:
+                        llm_answer = render_answer_with_llm(
+                            llm_render_fn=lambda prompt: render_sql_answer_with_llm(llm, prompt),
+                            question=effective_question,
+                            intent=final_sql_intent,
+                            slots=final_slots,
+                            period=period_ctx,
+                            results=execution_results,
+                            period_infer_reason=str(sql_nlu_trace.get("period_infer_reason") or ""),
+                        )
+                        if llm_answer:
+                            answer = llm_answer
+                            print("[SQL_ANSWER] renderer=llm")
+                        else:
+                            print("[SQL_ANSWER] renderer=rule_fallback")
+                    else:
+                        print("[SQL_ANSWER] renderer=rule_only")
+
                     print("[HYBRID] sql_used=True rag_used=False")
                     print("[ANSWER] mode=data_only llm_used=False")
                     chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
@@ -1858,35 +1968,25 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                     )
                     return stats
             else:
-                if force_sql_mode:
-                    missing = sql_exec.get("missing_params") or []
-                    if missing:
-                        missing_line = ", ".join(missing)
-                        answer = (
-                            "📌 한줄 요약\n"
-                            "- /sql 실행에 필요한 필수 파라미터가 부족합니다.\n\n"
-                            "💡 참고\n"
-                            f"- 누락 파라미터: {missing_line}\n"
-                            "- 예시: /sql version=VH yearmonth=202602 판매량"
-                        )
-                    else:
-                        answer = (
-                            "📌 한줄 요약\n"
-                            "- /sql 실행 중 오류가 발생했습니다.\n\n"
-                            "💡 참고\n"
-                            f"- 오류: {sql_exec.get('error')}"
-                        )
-                    chatBot.send_text(chatroom_id, f"🤖 {format_for_knox_text(answer)}")
-                    save_conversation_memory(
-                        scope_id=scope_id,
-                        room_id=str(chatroom_id),
-                        user_id=sender_knox,
-                        role="assistant",
-                        content=answer,
-                        chat_type=chat_type,
+                sql_exec = execute_sql_match(sql_match, question=effective_question, run_oracle_query=run_oracle_query)
+                sql_df = sql_exec.get("df")
+                sql_rows = len(sql_df.index) if isinstance(sql_df, pd.DataFrame) else 0
+                print(
+                    f"[SQL_EXEC] runner={sql_exec.get('runner')} rows={sql_rows} "
+                    f"elapsed_ms={sql_exec.get('elapsed_ms', 0)} ok={sql_exec.get('ok')}"
+                )
+                if sql_exec.get("ok"):
+                    sql_used = True
+                    sql_summary = summarize_sql_result(
+                        sql_exec["df"],
+                        result_mode=str(sql_exec.get("result_mode") or "table"),
+                        result_field=str(sql_exec.get("result_field") or ""),
+                        empty_message=str(sql_exec.get("empty_message") or "조회 결과가 없습니다."),
                     )
-                    return stats
-                print(f"[SQL_EXEC] failed runner={sql_exec.get('runner')} error={sql_exec.get('error')}")
+                    sql_summary_text = "\n".join(sql_summary.get("bullets") or [])
+                    print(f"[SQL_RESULT] summary_chars={len(sql_summary_text)}")
+                else:
+                    print(f"[SQL_EXEC] failed runner={sql_exec.get('runner')} error={sql_exec.get('error')}")
 
         if final_intent == "general_llm":
             from langchain_core.messages import SystemMessage, HumanMessage

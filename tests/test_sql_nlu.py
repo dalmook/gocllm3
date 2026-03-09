@@ -1,7 +1,23 @@
 import unittest
 from datetime import datetime
 
-from app.sql_registry import analyze_sql_question, build_sql_params_with_missing
+from app.sql_answering import render_answer_rule_based
+from app.sql_registry import (
+    analyze_sql_question,
+    build_execution_plan,
+    build_sql_params_with_missing,
+)
+
+
+class FakeDF:
+    def __init__(self, rows):
+        self._rows = rows
+        self.empty = len(rows) == 0
+
+    def to_dict(self, orient="records"):
+        if orient != "records":
+            return {}
+        return list(self._rows)
 
 
 class SqlNluTest(unittest.TestCase):
@@ -29,6 +45,15 @@ class SqlNluTest(unittest.TestCase):
             self.assertEqual(expected_intent, tr.get("final_intent"), msg=q)
             self.assertTrue(tr.get("selected_query_id"), msg=q)
 
+    def test_default_period_inference(self):
+        tr = self._analyze("VH 판매 몇개야?")
+        self.assertEqual("sales_total", tr.get("final_intent"))
+        self.assertTrue(tr.get("period_inferred"))
+        self.assertIn("올해 누적", tr.get("period_infer_reason") or "")
+        p = tr.get("resolved_period") or {}
+        self.assertEqual("202601", p.get("start_yyyymm"))
+        self.assertEqual("202612", p.get("end_yyyymm"))
+
     def test_spacing_variations(self):
         cases = ["올해몇개", "이번분기판매량", "WC올해판매", "버전별판매량"]
         for q in cases:
@@ -51,6 +76,18 @@ class SqlNluTest(unittest.TestCase):
         self.assertEqual("202510", p2.get("compare_start_yyyymm"))
         self.assertEqual("202512", p2.get("compare_end_yyyymm"))
 
+    def test_execution_plan(self):
+        tr = self._analyze("VH 판매 몇개야?")
+        plan = build_execution_plan(
+            "VH 판매 몇개야?",
+            tr.get("final_intent") or "",
+            tr.get("final_slots") or {},
+            tr.get("selected_query_id") or "",
+        )
+        self.assertGreaterEqual(len(plan), 2)
+        self.assertEqual("primary", plan[0].role)
+        self.assertEqual("aux", plan[1].role)
+
     def test_missing_slot_fallback(self):
         tr = self._analyze("판매량")
         self.assertTrue(tr.get("selected_query_id"))
@@ -58,8 +95,33 @@ class SqlNluTest(unittest.TestCase):
         self.assertIsNotNone(m)
         params, missing = build_sql_params_with_missing(m, "판매량")
         self.assertEqual([], missing)
-        self.assertTrue(params.get("start_yyyymm"))
-        self.assertTrue(params.get("end_yyyymm"))
+        self.assertTrue(params.get("start_yyyymm") or params.get("anchor_yyyymm"))
+
+    def test_rule_renderer_sentence_format(self):
+        tr = self._analyze("VH 판매 몇개야?")
+        answer = render_answer_rule_based(
+            "VH 판매 몇개야?",
+            intent=tr.get("final_intent") or "sales_total",
+            slots=tr.get("final_slots") or {},
+            period=tr.get("resolved_period") or {},
+            results=[
+                {"query_id": "sales_total_period_range", "role": "primary", "df": FakeDF([{"SALES": 1566.50128}])},
+                {
+                    "query_id": "sales_trend_monthly",
+                    "role": "aux",
+                    "df": FakeDF([
+                        {"YEARMONTH": "202601", "SALES": 500.0},
+                        {"YEARMONTH": "202602", "SALES": 600.0},
+                        {"YEARMONTH": "202603", "SALES": 466.50128},
+                    ]),
+                },
+            ],
+            period_infer_reason=tr.get("period_infer_reason") or "",
+        )
+        self.assertIn("📌 한줄 요약", answer)
+        self.assertIn("📊 데이터 기반 답변", answer)
+        self.assertIn("🧭 해석 기준", answer)
+        self.assertNotIn("SALES=", answer)
 
 
 if __name__ == "__main__":

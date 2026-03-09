@@ -1,0 +1,216 @@
+import json
+import re
+from typing import Any, Callable, Dict, List, Optional
+
+
+def _get_df_rows(df: Any) -> List[Dict[str, Any]]:
+    if df is None:
+        return []
+    try:
+        if getattr(df, "empty", False):
+            return []
+    except Exception:
+        pass
+    try:
+        return [dict(x) for x in df.to_dict(orient="records")]
+    except Exception:
+        return []
+
+
+def _format_number(value: Any, unit: str = "개") -> str:
+    if value is None:
+        return f"0{unit}"
+    try:
+        n = float(value)
+    except Exception:
+        return str(value)
+    if abs(n - round(n)) < 0.05:
+        return f"{int(round(n)):,}{unit}"
+    return f"{round(n, 1):,}{unit}"
+
+
+def _pick_scalar_value(rows: List[Dict[str, Any]]) -> Optional[float]:
+    if not rows:
+        return None
+    row = rows[0]
+    for key in ("sales", "SALES", "current_sales", "CURRENT_SALES"):
+        if key in row:
+            try:
+                return float(row[key])
+            except Exception:
+                pass
+    for _, v in row.items():
+        try:
+            return float(v)
+        except Exception:
+            continue
+    return None
+
+
+def _pick_compare_values(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    out = {"current": 0.0, "previous": 0.0, "diff": 0.0}
+    if not rows:
+        return out
+    row = rows[0]
+    for key, target in [
+        ("current_sales", "current"),
+        ("CURRENT_SALES", "current"),
+        ("previous_sales", "previous"),
+        ("PREVIOUS_SALES", "previous"),
+        ("diff_sales", "diff"),
+        ("DIFF_SALES", "diff"),
+    ]:
+        if key in row:
+            try:
+                out[target] = float(row[key])
+            except Exception:
+                pass
+    if out["diff"] == 0.0:
+        out["diff"] = out["current"] - out["previous"]
+    return out
+
+
+def _top_months(rows: List[Dict[str, Any]], top_n: int = 2) -> List[str]:
+    vals = []
+    for r in rows:
+        ym = str(r.get("YEARMONTH") or r.get("yearmonth") or "")
+        sales = r.get("sales") if "sales" in r else r.get("SALES")
+        if not ym:
+            continue
+        try:
+            vals.append((ym, float(sales or 0)))
+        except Exception:
+            continue
+    vals.sort(key=lambda x: x[1], reverse=True)
+    out = []
+    for ym, v in vals[:top_n]:
+        if re.fullmatch(r"20\d{2}(0[1-9]|1[0-2])", ym):
+            out.append(f"{ym[:4]}-{ym[4:]} {_format_number(v)}")
+        else:
+            out.append(f"{ym} {_format_number(v)}")
+    return out
+
+
+def render_answer_rule_based(
+    question: str,
+    *,
+    intent: str,
+    slots: Dict[str, Any],
+    period: Dict[str, Any],
+    results: List[Dict[str, Any]],
+    period_infer_reason: str = "",
+) -> str:
+    by_role = {str(r.get("role") or ""): r for r in results}
+    primary = by_role.get("primary") or (results[0] if results else {})
+    primary_rows = _get_df_rows(primary.get("df"))
+
+    summary = "조회 결과를 확인했습니다."
+    data_lines: List[str] = []
+
+    if intent == "sales_compare":
+        c = _pick_compare_values(primary_rows)
+        summary = f"비교 기준 판매량은 현재 {_format_number(c['current'])}, 이전 {_format_number(c['previous'])}입니다."
+        data_lines.append(f"- 현재 기간: {_format_number(c['current'])}")
+        data_lines.append(f"- 비교 기간: {_format_number(c['previous'])}")
+        data_lines.append(f"- 증감: {_format_number(c['diff'])}")
+    elif intent == "sales_trend":
+        peaks = _top_months(primary_rows, top_n=2)
+        summary = f"{period.get('label') or '지정 기간'} 판매 추이를 조회했습니다."
+        if peaks:
+            data_lines.append(f"- 상위 월: {', '.join(peaks)}")
+        aux = by_role.get("aux")
+        if aux:
+            aux_rows = _get_df_rows(aux.get("df"))
+            total = _pick_scalar_value(aux_rows)
+            if total is not None:
+                data_lines.append(f"- 기간 총합: {_format_number(total)}")
+    elif intent == "sales_grouped":
+        top = []
+        for r in primary_rows[:5]:
+            ver = str(r.get("VERSION") or r.get("version") or "-")
+            sales = r.get("sales") if "sales" in r else r.get("SALES")
+            top.append(f"{ver} {_format_number(sales)}")
+        summary = f"{period.get('label') or '지정 기간'} 버전별 판매량을 조회했습니다."
+        if top:
+            data_lines.append(f"- 상위 버전: {', '.join(top)}")
+    else:
+        total = _pick_scalar_value(primary_rows)
+        if total is None:
+            total = 0.0
+        version = str(slots.get("version") or "전체")
+        summary = f"{period.get('label') or '지정 기간'} {version} 누적 판매량은 {_format_number(total)}입니다."
+        data_lines.append(f"- 누적 판매량: {_format_number(total)}")
+        aux = by_role.get("aux")
+        if aux:
+            aux_peaks = _top_months(_get_df_rows(aux.get("df")), top_n=3)
+            if aux_peaks:
+                data_lines.append(f"- 월별 breakdown: {', '.join(aux_peaks)}")
+
+    if not data_lines:
+        data_lines.append("- 조회 결과가 없습니다.")
+
+    agg = str(slots.get("aggregation") or "sum")
+    agg_map = {"sum": "합계", "avg": "평균", "max": "최대", "min": "최소", "count": "건수"}
+    dim = str(slots.get("dimension") or "-")
+    version = str(slots.get("version") or "전체")
+    period_label = str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
+
+    lines = [
+        "📌 한줄 요약",
+        f"- {summary}",
+        "",
+        "📊 데이터 기반 답변",
+    ]
+    lines.extend(data_lines)
+    lines.extend(["", "🧭 해석 기준"])
+    if period_infer_reason:
+        lines.append(f"- {period_infer_reason}")
+    lines.append(f"- 기준: version={version}, 기간={period_label}, 집계={agg_map.get(agg, agg)}, 차원={dim}")
+    lines.extend(["", "🔗 이슈지 바로가기 👉 https://go/issueG"])
+    return "\n".join(lines)
+
+
+def build_sql_render_prompt(payload: Dict[str, Any]) -> str:
+    return (
+        "다음 structured 결과를 바탕으로 한국어 답변을 작성하세요. SQL 작성 금지. "
+        "반드시 섹션 3개(한줄 요약, 데이터 기반 답변, 해석 기준)로 답하세요.\n"
+        f"INPUT={json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def render_answer_with_llm(
+    *,
+    llm_render_fn: Callable[[str], Optional[str]],
+    question: str,
+    intent: str,
+    slots: Dict[str, Any],
+    period: Dict[str, Any],
+    results: List[Dict[str, Any]],
+    period_infer_reason: str = "",
+) -> Optional[str]:
+    payload = {
+        "question": question,
+        "intent": intent,
+        "slots": slots,
+        "period": period,
+        "period_infer_reason": period_infer_reason,
+        "result_rows": [
+            {
+                "query_id": r.get("query_id"),
+                "role": r.get("role"),
+                "rows": _get_df_rows(r.get("df"))[:12],
+            }
+            for r in results
+        ],
+    }
+    prompt = build_sql_render_prompt(payload)
+    try:
+        text = llm_render_fn(prompt)
+        if not text or not isinstance(text, str):
+            return None
+        t = text.strip()
+        if "📌" not in t:
+            return None
+        return t
+    except Exception:
+        return None

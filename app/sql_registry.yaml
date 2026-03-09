@@ -1,11 +1,53 @@
 queries:
-  - id: sales_total
+  - id: sales_total_month
     intent: sales_total
-    description: "판매량 합계/기본 집계 조회"
-    keywords: ["판매", "판매량", "매출", "실적", "몇개", "얼마", "올해", "분기", "월"]
+    description: "단월 판매량 합계"
+    keywords: ["판매", "판매량", "매출", "실적", "월", "몇개", "얼마"]
     patterns:
+      - "\\d{1,2}월"
       - "(판매|판매량|매출|실적)"
-      - "(올해|작년|분기|월|최근\\s*\\d+개월)"
+    supported_slots: ["metric", "aggregation", "period_type", "period_value", "version"]
+    default_aggregation: "sum"
+    supports_compare: false
+    supports_trend: false
+    groupable_dimensions: []
+    sql: |
+      SELECT NVL(SUM(SALES_MEQ), 0) AS sales
+      FROM mst_psi_simul_report
+      WHERE 1=1
+        AND workdate = (
+          SELECT MAX(workdate)
+          FROM mst_psi_simul_report
+          WHERE P_MODULE = 'PMIX'
+            AND S_MODULE = 'SOKBO'
+            AND YEARMONTH = :anchor_yyyymm
+            AND (:version IS NULL OR UPPER(VERSION) = UPPER(:version))
+        )
+        AND P_MODULE = 'PMIX'
+        AND S_MODULE = 'SOKBO'
+        AND YEARMONTH = :anchor_yyyymm
+        AND (:version IS NULL OR UPPER(VERSION) = UPPER(:version))
+    params:
+      version:
+        type: string
+        required: false
+        aliases: ["버전", "VERSION", "vh", "version", "wc"]
+      anchor_yyyymm:
+        type: yyyymm
+        required: true
+        aliases: ["월", "년월", "anchor", "month"]
+    result:
+      mode: scalar
+      field: sales
+      empty_message: "해당 조건의 판매 데이터가 없습니다."
+
+  - id: sales_total_period_range
+    intent: sales_total
+    description: "기간 범위 판매량 합계"
+    keywords: ["판매", "판매량", "매출", "실적", "올해", "분기", "누적", "최근"]
+    patterns:
+      - "(올해|작년|분기|최근\\s*\\d+개월)"
+      - "(판매|판매량|매출|실적)"
     supported_slots: ["metric", "aggregation", "period_type", "period_value", "version"]
     default_aggregation: "sum"
     supports_compare: false
@@ -45,13 +87,13 @@ queries:
       field: sales
       empty_message: "해당 조건의 판매 데이터가 없습니다."
 
-  - id: sales_trend
+  - id: sales_trend_monthly
     intent: sales_trend
-    description: "월별 판매 추이 조회"
-    keywords: ["추이", "월별", "트렌드", "판매", "판매량", "최근"]
+    description: "월별 판매 추이"
+    keywords: ["추이", "흐름", "트렌드", "월별", "판매", "판매량"]
     patterns:
-      - "(월별|추이|트렌드)"
-      - "최근\\s*\\d+개월"
+      - "(추이|흐름|트렌드)"
+      - "월별"
     supported_slots: ["metric", "period_type", "period_value", "version", "dimension", "trend"]
     default_aggregation: "sum"
     supports_compare: false
@@ -93,14 +135,14 @@ queries:
       mode: table
       empty_message: "해당 조건의 판매 추이 데이터가 없습니다."
 
-  - id: sales_grouped
+  - id: sales_grouped_by_version
     intent: sales_grouped
-    description: "버전별 판매량 조회"
-    keywords: ["버전별", "버전", "version", "판매", "판매량", "매출"]
+    description: "버전별 판매량"
+    keywords: ["버전별", "version별", "판매", "판매량", "매출"]
     patterns:
-      - "(버전별|version별|version by)"
-      - "(버전|version).*(판매|판매량|매출)"
-    supported_slots: ["metric", "period_type", "period_value", "version", "dimension"]
+      - "(버전별|version별|버전 별)"
+      - "(버전|version).*(판매|판매량|매출|실적)"
+    supported_slots: ["metric", "period_type", "period_value", "dimension"]
     default_aggregation: "sum"
     supports_compare: false
     supports_trend: false
@@ -135,10 +177,10 @@ queries:
       mode: table
       empty_message: "해당 조건의 버전별 판매 데이터가 없습니다."
 
-  - id: sales_compare
+  - id: sales_compare_periods
     intent: sales_compare
-    description: "기간 대비 판매량 비교"
-    keywords: ["대비", "전월", "전분기", "전년", "비교", "판매", "판매량"]
+    description: "기간 비교 판매량"
+    keywords: ["전월", "전분기", "전년", "대비", "비교", "판매량"]
     patterns:
       - "(전월|전분기|전년)\\s*대비"
       - "비교"
@@ -203,7 +245,6 @@ queries:
     patterns:
       - "\\d{1,2}월.*(판매|판매량|매출)"
       - "(version|버전|vh).*판매"
-      - "(판매|판매량|매출).*(version|버전|vh)"
     supported_slots: ["metric", "aggregation", "period_type", "period_value", "version"]
     default_aggregation: "sum"
     supports_compare: false
