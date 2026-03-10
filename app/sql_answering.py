@@ -46,7 +46,7 @@ def _format_metric_value(value: Any, *, unit: str, percent_scale: str = "percent
             n = 0.0
         if _normalize_percent_scale(percent_scale) == "fraction":
             n *= 100.0
-        return f"{n:.1f}%"
+        return f"{n:.2f}%"
     return _format_number(value, f" {unit}")
 
 

@@ -550,7 +550,7 @@ class SqlNluTest(unittest.TestCase):
             results=[{"query_id": "total", "role": "primary", "df": FakeDF([{"VALUE": 0.4}])}],
             period_infer_reason="",
         )
-        self.assertIn("VH 수율은 평균 40.0%입니다.", answer)
+        self.assertIn("VH 수율은 평균 40.00%입니다.", answer)
         self.assertNotIn("수율 합계", answer)
         self.assertNotIn("0.4개", answer)
         self.assertNotIn("수율 합계 0.4개", answer)
@@ -573,7 +573,7 @@ class SqlNluTest(unittest.TestCase):
             results=[{"query_id": "total", "role": "primary", "df": FakeDF([{"VALUE": 40.0}])}],
             period_infer_reason="",
         )
-        self.assertIn("VH 수율은 평균 40.0%입니다.", answer)
+        self.assertIn("VH 수율은 평균 40.00%입니다.", answer)
         self.assertNotIn("수율 합계", answer)
         self.assertNotIn("0.4개", answer)
         self.assertNotIn("수율 합계 0.4개", answer)
