@@ -182,6 +182,44 @@ class SqlNluTest(unittest.TestCase):
         self.assertIn("해석 기간: 2026년 2월", answer)
         self.assertIn("질문 표현: 2월", answer)
 
+    def test_rule_renderer_enriches_compare_summary_and_criteria(self):
+        tr = self._analyze("2월 vh와 vl 순생산 비교 분석해줘")
+        answer = render_answer_rule_based(
+            "2월 vh와 vl 순생산 비교 분석해줘",
+            intent=tr.get("final_intent") or "metric_compare_versions",
+            slots=tr.get("final_slots") or {},
+            period=tr.get("resolved_period") or {},
+            results=[
+                {
+                    "query_id": "compare_versions_same_period",
+                    "role": "primary",
+                    "df": FakeDF([
+                        {"VERSION": "VH", "VALUE": 140.0},
+                        {"VERSION": "VL", "VALUE": 100.0},
+                    ]),
+                },
+            ],
+            period_infer_reason=tr.get("period_infer_reason") or "",
+        )
+        self.assertIn("격차는 +40.0%", answer)
+        self.assertIn("절대 차이는 40 MEQ", answer)
+        self.assertIn("기준 source", answer)
+
+    def test_rule_renderer_enriches_total_answer(self):
+        tr = self._analyze("VH 판매 몇개야?")
+        answer = render_answer_rule_based(
+            "VH 판매 몇개야?",
+            intent=tr.get("final_intent") or "sales_total",
+            slots=tr.get("final_slots") or {},
+            period=tr.get("resolved_period") or {},
+            results=[
+                {"query_id": "sales_total_period_range", "role": "primary", "df": FakeDF([{"SALES": 1566.50128}])},
+            ],
+            period_infer_reason=tr.get("period_infer_reason") or "",
+        )
+        self.assertIn("평균 기준값", answer)
+        self.assertIn("집계 대상 건수", answer)
+
     def test_trend_periods_slots_and_params(self):
         tr = self._analyze("2월 3월 4월 vh 트렌드 분석해줘")
         self.assertEqual("metric_trend_by_period", tr.get("final_intent"))

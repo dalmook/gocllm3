@@ -29,6 +29,10 @@ def _format_number(value: Any, unit: str = "개") -> str:
     return f"{round(n, 1):,}{unit}"
 
 
+def _format_percent(value: float) -> str:
+    return f"{value:+.1f}%"
+
+
 def _format_filters(filters: Dict[str, Any]) -> str:
     if not isinstance(filters, dict) or not filters:
         return ""
@@ -39,6 +43,42 @@ def _format_filters(filters: Dict[str, Any]) -> str:
         if cleaned:
             parts.append(f"{str(k).upper()}={','.join(cleaned)}")
     return ", ".join(parts)
+
+
+def _metric_label(metric: str) -> str:
+    return {
+        "sales": "판매",
+        "net_prod": "순생산",
+        "net_ipgo": "순입고",
+    }.get(metric, metric)
+
+
+def _build_common_criteria_lines(
+    *,
+    period_label: str = "",
+    resolved_period_line: str = "",
+    source_name: str,
+    filter_text: str = "",
+    agg_label: str = "",
+    version: str = "",
+    dimension: str = "",
+) -> List[str]:
+    lines: List[str] = []
+    if period_label:
+        lines.append(f"- 기준 기간: {period_label}")
+    if resolved_period_line:
+        lines.append(resolved_period_line)
+    if filter_text:
+        lines.append(f"- 적용 필터: {filter_text}")
+    if version:
+        lines.append(f"- 버전 기준: {version}")
+    if dimension and dimension != "-":
+        lines.append(f"- 분석 차원: {dimension}")
+    if agg_label:
+        lines.append(f"- 집계 방식: {agg_label}")
+    lines.append(f"- 기준 source: {source_name}")
+    lines.append("- 최신 적재 기준으로 조회")
+    return lines
 
 
 def _pick_scalar_value(rows: List[Dict[str, Any]]) -> Optional[float]:
@@ -213,25 +253,25 @@ def render_compare_versions_answer(
     ratio = stat["ratio"]
     ratio_text = f"{ratio:+.1f}%"
 
-    metric_label = {
-        "sales": "판매",
-        "net_prod": "순생산",
-        "net_ipgo": "순입고",
-    }.get(metric, metric)
+    metric_label = _metric_label(metric)
+    total = left_val + right_val
+    top_share = (top_val / total * 100.0) if total else 0.0
+    gap_vs_total = (diff / total * 100.0) if total else 0.0
 
     analysis_lines: List[str] = []
     if abs(ratio) >= 20:
-        analysis_lines.append(f"- {top_ver} 우세가 뚜렷합니다.")
+        analysis_lines.append(f"- {top_ver} 우세가 뚜렷하며 격차가 전체 합계의 {_format_percent(gap_vs_total)} 수준입니다.")
     elif abs(ratio) >= 5:
-        analysis_lines.append(f"- {top_ver}가 {low_ver}보다 높게 나타났습니다.")
+        analysis_lines.append(f"- {top_ver}가 {low_ver}보다 의미 있게 높고 점유 비중은 {top_share:.1f}%입니다.")
     else:
-        analysis_lines.append("- 두 버전 간 차이가 크지 않습니다.")
-    analysis_lines.append("- 추가 기간 비교 시 추세 판단 정확도가 높아집니다.")
+        analysis_lines.append(f"- 두 버전 간 차이가 크지 않아 단일 월 판단보다 다기간 비교가 적절합니다. (상위 비중 {top_share:.1f}%)")
+    analysis_lines.append(f"- 절대 차이는 {_format_number(diff, f' {unit}')}이고 상대 격차는 {ratio_text}입니다.")
+    analysis_lines.append("- 다음 단계로는 전월/전년 동월 비교를 붙이면 구조적 차이인지 일시 변동인지 구분하기 쉽습니다.")
 
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {filter_text + ' 기준 ' if filter_text else ''}{top_ver} {metric_label}은 {low_ver} 대비 {_format_number(diff, f' {unit}')} 높습니다.",
+            f"- {filter_text + ' 기준 ' if filter_text else ''}{period_label} {metric_label} 비교에서 {top_ver}가 {low_ver} 대비 {_format_number(diff, f' {unit}')} 높고, 격차는 {ratio_text}입니다.",
             "",
             "📊 비교 결과",
             f"- {left_ver}: {_format_number(left_val, f' {unit}')}",
@@ -243,10 +283,12 @@ def render_compare_versions_answer(
             *analysis_lines,
             "",
             "⚠️ 기준",
-            f"- 기준 기간: {period_label}",
-            *([resolved_period_line] if resolved_period_line else []),
-            f"- 기준 source: {source_name}",
-            "- 최신 적재 기준으로 조회",
+            *_build_common_criteria_lines(
+                period_label=period_label,
+                resolved_period_line=resolved_period_line,
+                source_name=source_name,
+                filter_text=filter_text,
+            ),
         ]
     )
 
@@ -266,11 +308,7 @@ def render_trend_answer(
     source_name: str,
     filter_text: str = "",
 ) -> str:
-    metric_label = {
-        "sales": "판매",
-        "net_prod": "순생산",
-        "net_ipgo": "순입고",
-    }.get(metric, metric)
+    metric_label = _metric_label(metric)
 
     if not rows:
         lines = [
@@ -325,6 +363,11 @@ def render_trend_answer(
         pattern = "변동"
 
     trend_lines = [f"- {_ym_label(p)}: {_format_number(v, f' {unit}')}" for p, v in ordered]
+    values = [v for _, v in ordered]
+    peak_period, peak_val = max(ordered, key=lambda x: x[1])
+    low_period, low_val = min(ordered, key=lambda x: x[1])
+    avg_val = sum(values) / len(values)
+    span_ratio = ((peak_val - low_val) / low_val * 100.0) if low_val else 0.0
     analysis = []
     if len(ordered) >= 3:
         deltas = [ordered[i + 1][1] - ordered[i][1] for i in range(len(ordered) - 1)]
@@ -336,12 +379,14 @@ def render_trend_answer(
             analysis.append("- 기간이 진행될수록 증가하는 흐름입니다.")
         elif neg > 0:
             analysis.append("- 기간이 진행될수록 감소하는 흐름입니다.")
+    analysis.append(f"- 최고치는 {_ym_label(peak_period)} {_format_number(peak_val, f' {unit}')}, 최저치는 {_ym_label(low_period)} {_format_number(low_val, f' {unit}')}입니다.")
+    analysis.append(f"- 기간 평균은 {_format_number(avg_val, f' {unit}')}이며 고저 차는 {_format_percent(span_ratio)}입니다.")
     analysis.append("- 추가 기간 확장 시 계절성/일시 변동 구분이 쉬워집니다.")
 
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {filter_text + ' 기준 ' if filter_text else ''}{metric_label}은 {_ym_label(ordered[0][0])}→{_ym_label(ordered[-1][0])} 기준 {pattern} 패턴입니다.",
+            f"- {filter_text + ' 기준 ' if filter_text else ''}{metric_label}은 {_ym_label(ordered[0][0])}→{_ym_label(ordered[-1][0])} 구간에서 {pattern} 흐름이며, 최고치는 {_ym_label(peak_period)}입니다.",
             "",
             "📈 기간별 추이",
             *trend_lines,
@@ -350,9 +395,11 @@ def render_trend_answer(
             *analysis,
             "",
             "⚠️ 기준",
-            *([resolved_period_line] if resolved_period_line else []),
-            f"- 기준 source: {source_name}",
-            "- 최신 적재 기준 조회",
+            *_build_common_criteria_lines(
+                resolved_period_line=resolved_period_line,
+                source_name=source_name,
+                filter_text=filter_text,
+            ),
         ]
     )
 
@@ -366,11 +413,7 @@ def render_compare_period_groups_answer(
     source_name: str,
     filter_text: str = "",
 ) -> str:
-    metric_label = {
-        "sales": "판매",
-        "net_prod": "순생산",
-        "net_ipgo": "순입고",
-    }.get(metric, metric)
+    metric_label = _metric_label(metric)
 
     parsed = []
     for row in rows:
@@ -411,11 +454,13 @@ def render_compare_period_groups_answer(
     stat = compute_diff_and_ratio(top_val, low_val)
     ratio_text = f"{stat['ratio']:+.1f}%"
     direction = "높습니다" if stat["diff"] >= 0 else "낮습니다"
+    total = left_val + right_val
+    top_share = (top_val / total * 100.0) if total else 0.0
 
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {filter_text + ' 기준 ' if filter_text else ''}{metric_label}은 {top_label}이 {low_label} 대비 {_format_number(abs(stat['diff']), f' {unit}')} {direction}.",
+            f"- {filter_text + ' 기준 ' if filter_text else ''}{metric_label}은 {top_label}이 우세하며 {low_label} 대비 {_format_number(abs(stat['diff']), f' {unit}')} 차이입니다.",
             "",
             "📊 기간 그룹 비교",
             f"- {left_label}: {_format_number(left_val, f' {unit}')}",
@@ -424,13 +469,16 @@ def render_compare_period_groups_answer(
             f"- 증감률: {ratio_text}",
             "",
             "💡 분석",
-            "- 연간/그룹 단위 변화 폭을 우선 확인하는 비교입니다.",
+            f"- 상위 구간 {top_label}의 비중은 비교 대상 합계 기준 {top_share:.1f}%입니다.",
+            f"- 격차는 {ratio_text}로, 구조적 차이 확인을 위해 월 단위 드릴다운이 유효합니다.",
             "- 필요하면 월 단위 드릴다운으로 원인 구간을 추가 확인할 수 있습니다.",
             "",
             "⚠️ 기준",
-            *([resolved_period_line] if resolved_period_line else []),
-            f"- 기준 source: {source_name}",
-            "- 최신 적재 기준 조회",
+            *_build_common_criteria_lines(
+                resolved_period_line=resolved_period_line,
+                source_name=source_name,
+                filter_text=filter_text,
+            ),
         ]
     )
 
@@ -445,11 +493,7 @@ def render_grouped_dimension_answer(
     dimension: str,
     filter_text: str = "",
 ) -> str:
-    metric_label = {
-        "sales": "판매",
-        "net_prod": "순생산",
-        "net_ipgo": "순입고",
-    }.get(metric, metric)
+    metric_label = _metric_label(metric)
     dim_label = {
         "version": "버전",
         "yearmonth": "년월",
@@ -483,23 +527,30 @@ def render_grouped_dimension_answer(
 
     parsed.sort(key=lambda x: x[1], reverse=True)
     top_key, top_val = parsed[0]
+    bottom_key, bottom_val = parsed[-1]
+    total_val = sum(v for _, v in parsed)
+    top_share = (top_val / total_val * 100.0) if total_val else 0.0
     lines = [f"- {k}: {_format_number(v, f' {unit}')}" for k, v in parsed[:10]]
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {(filter_text + '에서 ' if filter_text else '')}{dim_label} 기준 {metric_label} 최대 항목은 {top_key}입니다.",
+            f"- {(filter_text + '에서 ' if filter_text else '')}{dim_label} 기준 {metric_label}은 {top_key}가 최댓값이며 비중은 {top_share:.1f}%입니다.",
             "",
             "📊 그룹별 결과",
             *lines,
             "",
             "💡 분석",
-            f"- 상위 항목 {top_key}가 {_format_number(top_val, f' {unit}')}로 가장 큽니다.",
+            f"- 상위 항목 {top_key}가 {_format_number(top_val, f' {unit}')}로 가장 크고, 하위 항목 {bottom_key}는 {_format_number(bottom_val, f' {unit}')}입니다.",
+            f"- 상하위 격차는 {_format_number(top_val - bottom_val, f' {unit}')}입니다.",
             "- 상위/하위 그룹 편차를 함께 보면 분산 정도를 빠르게 파악할 수 있습니다.",
             "",
             "⚠️ 기준",
-            *([resolved_period_line] if resolved_period_line else []),
-            f"- 기준 source: {source_name}",
-            "- 최신 적재 기준 조회",
+            *_build_common_criteria_lines(
+                resolved_period_line=resolved_period_line,
+                source_name=source_name,
+                filter_text=filter_text,
+                dimension=dim_label,
+            ),
         ]
     )
 
@@ -516,29 +567,44 @@ def render_total_answer(
     filter_text: str = "",
 ) -> str:
     total = 0.0
+    values: List[float] = []
     if rows:
         if ("VALUE" in rows[0]) or ("value" in rows[0]):
             for row in rows:
                 try:
-                    total += float(row.get("VALUE") if "VALUE" in row else row.get("value") or 0.0)
+                    num = float(row.get("VALUE") if "VALUE" in row else row.get("value") or 0.0)
+                    total += num
+                    values.append(num)
                 except Exception:
                     continue
         else:
             picked = _pick_scalar_value(rows)
             total = float(picked or 0.0)
+            if picked is not None:
+                values.append(float(picked))
+    avg_value = (sum(values) / len(values)) if values else total
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {filter_text + ' / ' if filter_text else ''}{period_label} 기준 {version_hint} {metric} 합계는 {_format_number(total, f' {unit}')}입니다.",
+            f"- {filter_text + ' / ' if filter_text else ''}{period_label} 기준 {version_hint} {_metric_label(metric)} 합계는 {_format_number(total, f' {unit}')}입니다.",
             "",
             "📊 데이터 기반 답변",
             f"- 합계: {_format_number(total, f' {unit}')}",
+            f"- 평균 기준값: {_format_number(avg_value, f' {unit}')}",
+            f"- 집계 대상 건수: {len(values) or len(rows)}건",
+            "",
+            "💡 분석",
+            "- 단일 합계 값은 수준 판단에는 유효하지만 변동 원인 분석에는 세부 breakdown이 추가로 필요합니다.",
+            "- 필요하면 버전별/월별/차원별 드릴다운으로 구성 차이를 이어서 확인할 수 있습니다.",
             "",
             "⚠️ 기준",
-            f"- 기준 기간: {period_label}",
-            *([resolved_period_line] if resolved_period_line else []),
-            f"- 기준 source: {source_name}",
-            "- 최신 적재 기준 조회",
+            *_build_common_criteria_lines(
+                period_label=period_label,
+                resolved_period_line=resolved_period_line,
+                source_name=source_name,
+                filter_text=filter_text,
+                version=version_hint,
+            ),
         ]
     )
 
@@ -682,8 +748,10 @@ def render_answer_rule_based(
                 total = 0.0
             version = str(slots.get("version") or "전체")
             prefix = f"{filter_text} 기준 " if filter_text else ""
-            summary = f"{prefix}{period_label or '지정 기간'} {version} 누적 판매량은 {_format_number(total)}입니다."
+            summary = f"{prefix}{period_label or '지정 기간'} {version} 누적 판매량은 {_format_number(total)}이며, 현재 질의는 총량 수준을 확인하는 용도에 적합합니다."
             data_lines.append(f"- 누적 판매량: {_format_number(total)}")
+            data_lines.append(f"- 평균 기준값: {_format_number(total)}")
+            data_lines.append("- 집계 대상 건수: 1건")
             aux = by_role.get("aux")
             if aux:
                 aux_peaks = _top_months(_get_df_rows(aux.get("df")), top_n=3)
@@ -709,9 +777,17 @@ def render_answer_rule_based(
     lines.extend(["", "🧭 해석 기준"])
     if period_infer_reason:
         lines.append(f"- {period_infer_reason}")
-    if resolved_period_line:
-        lines.append(resolved_period_line)
-    lines.append(f"- 기준: version={version}, 기간={period_label}, 집계={agg_map.get(agg, agg)}, 차원={dim}")
+    lines.extend(
+        _build_common_criteria_lines(
+            period_label=period_label,
+            resolved_period_line=resolved_period_line,
+            source_name=source_name,
+            filter_text=filter_text,
+            agg_label=agg_map.get(agg, agg),
+            version=version,
+            dimension=dim,
+        )
+    )
     lines.extend(["", "🔗 이슈지 바로가기 👉 https://go/issueG"])
     return "\n".join(lines)
 
@@ -721,7 +797,9 @@ def build_sql_render_prompt(payload: Dict[str, Any]) -> str:
         "다음 structured 결과를 바탕으로 한국어 답변을 작성하세요. SQL 작성 금지. "
         "반드시 섹션 3개(한줄 요약, 데이터 기반 답변, 해석 기준)로 답하세요. "
         "해석 기준 섹션의 기준 기간은 반드시 exact_period_label 값을 사용하세요. "
-        "resolved_period_line이 있으면 그대로 반영해 질문의 기간 표현과 실제 적용 기간을 명확히 드러내세요.\n"
+        "resolved_period_line이 있으면 그대로 반영해 질문의 기간 표현과 실제 적용 기간을 명확히 드러내세요. "
+        "한줄 요약은 단순 재진술이 아니라 우세 항목, 변동 방향, 격차 수준 중 최소 하나를 포함하세요. "
+        "데이터 기반 답변에는 핵심 수치 2개 이상을 넣고, 해석 기준에는 적용 필터/집계 방식/분석 차원을 드러내세요.\n"
         f"INPUT={json.dumps(payload, ensure_ascii=False)}"
     )
 
