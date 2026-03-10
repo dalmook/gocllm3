@@ -23,9 +23,9 @@ sources:
         description: "APP 분류"
       SALES_MEQ:
         description: "판매 수량"
-      NET_PROD_MEQ:
+      FABOUT_NET_MEQ:
         description: "순생산 수량"
-      NET_IPGO_MEQ:
+      WHIN_NET_MEQ:
         description: "순입고 수량"
 
 metrics:
@@ -38,13 +38,13 @@ metrics:
   net_prod:
     aliases: ["순생산", "생산", "net production", "net_prod"]
     source: psi_simul
-    value_column: NET_PROD_MEQ
+    value_column: FABOUT_NET_MEQ
     unit: "MEQ"
     description: "순생산 수량"
   net_ipgo:
     aliases: ["순입고", "입고", "net ipgo", "net_ipgo"]
     source: psi_simul
-    value_column: NET_IPGO_MEQ
+    value_column: WHIN_NET_MEQ
     unit: "MEQ"
     description: "순입고 수량"
 
@@ -76,10 +76,11 @@ dimensions:
     supports_filter: true
     supports_groupby: true
     value_mode: "catalog_or_free_text"
-    sample_values: ["DRAM", "NAND", "MOBILE"]
+    sample_values: ["DRAM", "NAND", "FLASH"]
     value_aliases:
       dram: "DRAM"
-      nand: "NAND"
+      nand: "FLASH"
+      flash: "FLASH"
     description: "FAM1 축"
   app:
     source: psi_simul
