@@ -21,7 +21,7 @@
 1. 대화 메모리 로드
 2. 질문 정규화와 contextual rewrite 여부 판단
 3. SQL registry 매칭과 query intent 분류
-4. `general_llm`, `data_only`, `rag_only`, `hybrid` 중 하나로 라우팅
+4. `general_llm`, `data_only`, `rag_only`, `hybrid`, `doc_nav`, `doc_summary` 중 하나로 라우팅
 5. SQL 또는 RAG 실행
 6. 최종 텍스트 답변 전송
 7. 필요 시 진행 메시지 recall, 메모리 저장, 피드백 카드 전송
@@ -258,6 +258,13 @@ dimensions:
 - `/sql ...`: SQL 질의
 - `/용어 ...`: 용어 조회
 - 그 외 일반 텍스트: 기본 LLM/RAG/Hybrid 라우팅
+
+## 일반 질의 Intent 규칙
+- `doc_nav`: 문서 제목/목록/최근/최신/금주 학습 문서 탐색 질문
+  - 예: `최근 문서 제목 알려줘`, `금주에 학습한 문서 알려줘`
+- `doc_summary`: 주차 맥락이 있는 보고/문서 요약 질문
+  - 예: `지난주 주간 보고에서 ... 정리해줘`, `이번주 주간 보고 기준 ... 정리해줘`
+- 위 규칙 외 문서성 질문은 기존 `rag_only`/`hybrid` fallback 유지
 
 ## 운영 환경변수
 

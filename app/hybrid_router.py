@@ -46,6 +46,8 @@ def build_route_decision(intent: str, sql_match: Optional[SQLRegistryMatch]) -> 
         return HybridRouteDecision(intent=intent, use_sql=bool(sql_match), use_rag=False, use_llm=True)
     if intent == "hybrid":
         return HybridRouteDecision(intent=intent, use_sql=bool(sql_match), use_rag=True, use_llm=True)
+    if intent in {"doc_nav", "doc_summary"}:
+        return HybridRouteDecision(intent=intent, use_sql=False, use_rag=True, use_llm=True)
     return HybridRouteDecision(intent="rag_only", use_sql=False, use_rag=True, use_llm=True)
 
 
