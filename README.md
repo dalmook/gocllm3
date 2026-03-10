@@ -104,6 +104,9 @@
 - `metrics`: 집계 대상 컬럼
   - metric별 `semantic_type`, `default_aggregation`, `allowed_aggregations` 지정 가능
   - `weighted_avg` 확장을 위한 `numerator_column`, `denominator_column` 필드 예약
+  - `%` metric은 `percent_scale`(`fraction|percent`)로 표시 스케일을 정의
+    - `fraction`: DB `0.4` -> `40.0%`
+    - `percent`: DB `40` -> `40.0%`
 - `dimensions`: 필터/그룹 차원
 - `query_families`: planner가 사용하는 공통 분석 패턴
 
@@ -242,6 +245,11 @@ dimensions:
   - `판매 합계`
   - `순생산 합계`
   - `순입고 합계`
+- ratio metric(`unit=%`)은 퍼센트 포맷 규칙을 강제합니다.
+  - `%` metric에는 `개` 단위를 붙이지 않습니다.
+  - `semantic_type=ratio`에서 집계 미지정 시 `avg`로 해석합니다.
+  - `%` metric에 `sum`이 들어오면 경고 후 `avg`로 fallback 합니다.
+  - `percent_scale=fraction`이면 `0.4 -> 40.0%`, `percent`면 `40 -> 40.0%`로 표시합니다.
 - 기본값이 적용된 경우 답변 하단에 짧게 명시합니다.
   - 예: `기본값 적용: 기간 지정이 없어 최신 완결 월(2026-02) 기준으로 조회했습니다.`
   - 예: `비교 기준: 최신 월 vs 전월`

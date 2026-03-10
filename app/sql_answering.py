@@ -33,6 +33,23 @@ def _format_percent(value: float) -> str:
     return f"{value:+.1f}%"
 
 
+def _normalize_percent_scale(raw: str) -> str:
+    scale = str(raw or "").strip().lower()
+    return scale if scale in {"fraction", "percent"} else "percent"
+
+
+def _format_metric_value(value: Any, *, unit: str, percent_scale: str = "percent") -> str:
+    if str(unit or "").strip() == "%":
+        try:
+            n = float(value or 0.0)
+        except Exception:
+            n = 0.0
+        if _normalize_percent_scale(percent_scale) == "fraction":
+            n *= 100.0
+        return f"{n:.1f}%"
+    return _format_number(value, f" {unit}")
+
+
 def _format_filters(filters: Dict[str, Any]) -> str:
     if not isinstance(filters, dict) or not filters:
         return ""
@@ -61,9 +78,21 @@ def _aggregation_label(agg: str) -> str:
         "avg": "평균",
         "max": "최대",
         "min": "최소",
-        "latest": "최신 스냅샷",
+        "latest": "최신",
         "weighted_avg": "가중평균",
     }.get(str(agg or "").lower(), str(agg or "합계"))
+
+
+def _normalize_render_aggregation(agg: str, *, unit: str, semantic_type: str = "") -> str:
+    value = str(agg or "").strip().lower()
+    if not value:
+        if str(semantic_type or "").strip().lower() == "ratio":
+            return "avg"
+        return "sum"
+    if str(unit or "").strip() == "%" and value == "sum":
+        print("[SQL_ANSWERING] WARN: percent metric rendered with sum -> fallback to avg")
+        return "avg"
+    return value
 
 
 def _version_hint_from_slots(slots: Dict[str, Any]) -> str:
@@ -232,6 +261,7 @@ def render_compare_versions_answer(
     rows: List[Dict[str, Any]],
     metric: str,
     unit: str,
+    percent_scale: str,
     period_label: str,
     resolved_period_line: str,
     source_name: str,
@@ -308,18 +338,18 @@ def render_compare_versions_answer(
         analysis_lines.append(f"- {top_ver}가 {low_ver}보다 의미 있게 높고 점유 비중은 {top_share:.1f}%입니다.")
     else:
         analysis_lines.append(f"- 두 버전 간 차이가 크지 않아 단일 월 판단보다 다기간 비교가 적절합니다. (상위 비중 {top_share:.1f}%)")
-    analysis_lines.append(f"- 절대 차이는 {_format_number(diff, f' {unit}')}이고 상대 격차는 {ratio_text}입니다.")
+    analysis_lines.append(f"- 절대 차이는 {_format_metric_value(diff, unit=unit, percent_scale=percent_scale)}이고 상대 격차는 {ratio_text}입니다.")
     analysis_lines.append("- 다음 단계로는 전월/전년 동월 비교를 붙이면 구조적 차이인지 일시 변동인지 구분하기 쉽습니다.")
 
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {filter_text + ' 기준 ' if filter_text else ''}{period_label} {metric_label} 비교에서 {top_ver}가 {low_ver} 대비 {_format_number(diff, f' {unit}')} 높고, 격차는 {ratio_text}입니다.",
+            f"- {filter_text + ' 기준 ' if filter_text else ''}{period_label} {metric_label} 비교에서 {top_ver}가 {low_ver} 대비 {_format_metric_value(diff, unit=unit, percent_scale=percent_scale)} 높고, 격차는 {ratio_text}입니다.",
             "",
             "📊 비교 결과",
-            f"- {left_ver}: {_format_number(left_val, f' {unit}')}",
-            f"- {right_ver}: {_format_number(right_val, f' {unit}')}",
-            f"- 차이: {_format_number(diff, f' {unit}')}",
+            f"- {left_ver}: {_format_metric_value(left_val, unit=unit, percent_scale=percent_scale)}",
+            f"- {right_ver}: {_format_metric_value(right_val, unit=unit, percent_scale=percent_scale)}",
+            f"- 차이: {_format_metric_value(diff, unit=unit, percent_scale=percent_scale)}",
             f"- 증감률: {ratio_text}",
             "",
             "💡 분석",
@@ -348,6 +378,7 @@ def render_trend_answer(
     rows: List[Dict[str, Any]],
     metric: str,
     unit: str,
+    percent_scale: str,
     resolved_period_line: str,
     source_name: str,
     filter_text: str = "",
@@ -407,7 +438,7 @@ def render_trend_answer(
     else:
         pattern = "변동"
 
-    trend_lines = [f"- {_ym_label(p)}: {_format_number(v, f' {unit}')}" for p, v in ordered]
+    trend_lines = [f"- {_ym_label(p)}: {_format_metric_value(v, unit=unit, percent_scale=percent_scale)}" for p, v in ordered]
     values = [v for _, v in ordered]
     peak_period, peak_val = max(ordered, key=lambda x: x[1])
     low_period, low_val = min(ordered, key=lambda x: x[1])
@@ -424,8 +455,8 @@ def render_trend_answer(
             analysis.append("- 기간이 진행될수록 증가하는 흐름입니다.")
         elif neg > 0:
             analysis.append("- 기간이 진행될수록 감소하는 흐름입니다.")
-    analysis.append(f"- 최고치는 {_ym_label(peak_period)} {_format_number(peak_val, f' {unit}')}, 최저치는 {_ym_label(low_period)} {_format_number(low_val, f' {unit}')}입니다.")
-    analysis.append(f"- 기간 평균은 {_format_number(avg_val, f' {unit}')}이며 고저 차는 {_format_percent(span_ratio)}입니다.")
+    analysis.append(f"- 최고치는 {_ym_label(peak_period)} {_format_metric_value(peak_val, unit=unit, percent_scale=percent_scale)}, 최저치는 {_ym_label(low_period)} {_format_metric_value(low_val, unit=unit, percent_scale=percent_scale)}입니다.")
+    analysis.append(f"- 기간 평균은 {_format_metric_value(avg_val, unit=unit, percent_scale=percent_scale)}이며 고저 차는 {_format_percent(span_ratio)}입니다.")
     analysis.append("- 추가 기간 확장 시 계절성/일시 변동 구분이 쉬워집니다.")
 
     return "\n".join(
@@ -455,6 +486,7 @@ def render_compare_period_groups_answer(
     rows: List[Dict[str, Any]],
     metric: str,
     unit: str,
+    percent_scale: str,
     resolved_period_line: str,
     source_name: str,
     filter_text: str = "",
@@ -507,12 +539,12 @@ def render_compare_period_groups_answer(
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {filter_text + ' 기준 ' if filter_text else ''}{metric_label}은 {top_label}이 우세하며 {low_label} 대비 {_format_number(abs(stat['diff']), f' {unit}')} 차이입니다.",
+            f"- {filter_text + ' 기준 ' if filter_text else ''}{metric_label}은 {top_label}이 우세하며 {low_label} 대비 {_format_metric_value(abs(stat['diff']), unit=unit, percent_scale=percent_scale)} 차이입니다.",
             "",
             "📊 기간 그룹 비교",
-            f"- {left_label}: {_format_number(left_val, f' {unit}')}",
-            f"- {right_label}: {_format_number(right_val, f' {unit}')}",
-            f"- 차이: {_format_number(stat['diff'], f' {unit}')}",
+            f"- {left_label}: {_format_metric_value(left_val, unit=unit, percent_scale=percent_scale)}",
+            f"- {right_label}: {_format_metric_value(right_val, unit=unit, percent_scale=percent_scale)}",
+            f"- 차이: {_format_metric_value(stat['diff'], unit=unit, percent_scale=percent_scale)}",
             f"- 증감률: {ratio_text}",
             "",
             "💡 분석",
@@ -536,6 +568,7 @@ def render_grouped_dimension_answer(
     rows: List[Dict[str, Any]],
     metric: str,
     unit: str,
+    percent_scale: str,
     resolved_period_line: str,
     source_name: str,
     dimension: str,
@@ -579,7 +612,7 @@ def render_grouped_dimension_answer(
     bottom_key, bottom_val = parsed[-1]
     total_val = sum(v for _, v in parsed)
     top_share = (top_val / total_val * 100.0) if total_val else 0.0
-    lines = [f"- {k}: {_format_number(v, f' {unit}')}" for k, v in parsed[:10]]
+    lines = [f"- {k}: {_format_metric_value(v, unit=unit, percent_scale=percent_scale)}" for k, v in parsed[:10]]
     return "\n".join(
         [
             "📌 한줄 요약",
@@ -589,8 +622,8 @@ def render_grouped_dimension_answer(
             *lines,
             "",
             "💡 분석",
-            f"- 상위 항목 {top_key}가 {_format_number(top_val, f' {unit}')}로 가장 크고, 하위 항목 {bottom_key}는 {_format_number(bottom_val, f' {unit}')}입니다.",
-            f"- 상하위 격차는 {_format_number(top_val - bottom_val, f' {unit}')}입니다.",
+            f"- 상위 항목 {top_key}가 {_format_metric_value(top_val, unit=unit, percent_scale=percent_scale)}로 가장 크고, 하위 항목 {bottom_key}는 {_format_metric_value(bottom_val, unit=unit, percent_scale=percent_scale)}입니다.",
+            f"- 상하위 격차는 {_format_metric_value(top_val - bottom_val, unit=unit, percent_scale=percent_scale)}입니다.",
             "- 상위/하위 그룹 편차를 함께 보면 분산 정도를 빠르게 파악할 수 있습니다.",
             "",
             "⚠️ 기준",
@@ -610,6 +643,8 @@ def render_total_answer(
     rows: List[Dict[str, Any]],
     metric: str,
     unit: str,
+    aggregation: str,
+    percent_scale: str,
     period_label: str,
     resolved_period_line: str,
     source_name: str,
@@ -633,15 +668,30 @@ def render_total_answer(
             total = float(picked or 0.0)
             if picked is not None:
                 values.append(float(picked))
+    agg = str(aggregation or "sum").lower()
+    if values:
+        if agg == "avg":
+            total = sum(values) / len(values)
+        elif agg == "max":
+            total = max(values)
+        elif agg == "min":
+            total = min(values)
+        elif agg == "latest":
+            total = values[-1]
+        else:
+            total = sum(values)
     avg_value = (sum(values) / len(values)) if values else total
+    agg_label = _aggregation_label(agg)
+    metric_label = _metric_label(metric)
+    agg_sentence = f"{metric_label}은(는) {agg_label} 기준입니다."
     return "\n".join(
         [
             "📌 한줄 요약",
-            f"- {filter_text + ' / ' if filter_text else ''}{period_label} 기준 {version_hint} {_metric_label(metric)} 합계는 {_format_number(total, f' {unit}')}입니다.",
+            f"- {filter_text + ' / ' if filter_text else ''}{period_label} 기준 {version_hint} {metric_label}은 {agg_label} {_format_metric_value(total, unit=unit, percent_scale=percent_scale)}입니다.",
             "",
             "📊 데이터 기반 답변",
-            f"- 합계: {_format_number(total, f' {unit}')}",
-            f"- 평균 기준값: {_format_number(avg_value, f' {unit}')}",
+            f"- {metric_label} {agg_label}: {_format_metric_value(total, unit=unit, percent_scale=percent_scale)}",
+            f"- 평균 기준값: {_format_metric_value(avg_value, unit=unit, percent_scale=percent_scale)}",
             f"- 집계 대상 건수: {len(values) or len(rows)}건",
             "",
             "💡 분석",
@@ -655,7 +705,9 @@ def render_total_answer(
                 source_name=source_name,
                 filter_text=filter_text,
                 version=version_hint,
+                agg_label=agg_label,
             ),
+            f"- {agg_sentence}",
             *(default_lines or []),
         ]
     )
@@ -700,6 +752,13 @@ def render_answer_rule_based(
 
     metric = str(slots.get("metric") or "sales")
     unit = str(slots.get("metric_unit") or "MEQ")
+    semantic_type = str(slots.get("metric_semantic_type") or "")
+    percent_scale = str(slots.get("percent_scale") or "percent")
+    aggregation = _normalize_render_aggregation(
+        str(slots.get("aggregation") or ""),
+        unit=unit,
+        semantic_type=semantic_type,
+    )
     source_name = str(slots.get("source_name") or "psi_simul")
     period_label = _build_exact_period_label(period) or str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
     resolved_period_line = _build_resolved_period_line(period)
@@ -715,6 +774,7 @@ def render_answer_rule_based(
             rows=primary_rows,
             metric=metric,
             unit=unit,
+            percent_scale=percent_scale,
             period_label=period_label,
             resolved_period_line=resolved_period_line,
             source_name=source_name,
@@ -726,6 +786,7 @@ def render_answer_rule_based(
             rows=primary_rows,
             metric=metric,
             unit=unit,
+            percent_scale=percent_scale,
             resolved_period_line=resolved_period_line,
             source_name=source_name,
             filter_text=filter_text,
@@ -736,6 +797,7 @@ def render_answer_rule_based(
             rows=primary_rows,
             metric=metric,
             unit=unit,
+            percent_scale=percent_scale,
             resolved_period_line=resolved_period_line,
             source_name=source_name,
             filter_text=filter_text,
@@ -746,6 +808,7 @@ def render_answer_rule_based(
             rows=primary_rows,
             metric=metric,
             unit=unit,
+            percent_scale=percent_scale,
             resolved_period_line=resolved_period_line,
             source_name=source_name,
             dimension=str(slots.get("dimension") or ""),
@@ -758,6 +821,7 @@ def render_answer_rule_based(
                 rows=primary_rows,
                 metric=metric,
                 unit=unit,
+                percent_scale=percent_scale,
                 period_label=period_label,
                 resolved_period_line=resolved_period_line,
                 source_name=source_name,
@@ -790,15 +854,17 @@ def render_answer_rule_based(
         if top:
             data_lines.append(f"- 상위 버전: {', '.join(top)}")
     else:
-        if primary_rows and (("VERSION" in primary_rows[0]) or ("version" in primary_rows[0])) and (("VALUE" in primary_rows[0]) or ("value" in primary_rows[0])):
+        if primary_rows and (("VALUE" in primary_rows[0]) or ("value" in primary_rows[0])):
             return render_total_answer(
                 rows=primary_rows,
                 metric=metric,
                 unit=unit,
+                aggregation=aggregation,
+                percent_scale=percent_scale,
                 period_label=period_label,
                 resolved_period_line=resolved_period_line,
                 source_name=source_name,
-                version_hint="전체",
+                version_hint=_version_hint_from_slots(slots),
                 filter_text=filter_text,
                 default_lines=default_lines,
             )
@@ -809,9 +875,9 @@ def render_answer_rule_based(
             version = _version_hint_from_slots(slots)
             prefix = f"{filter_text} 기준 " if filter_text else ""
             metric_label = _metric_label(metric)
-            summary = f"{prefix}{period_label or '지정 기간'} {version} {metric_label} 합계는 {_format_number(total)}이며, 현재 질의는 총량 수준을 확인하는 용도에 적합합니다."
-            data_lines.append(f"- {metric_label} 합계: {_format_number(total)}")
-            data_lines.append(f"- 평균 기준값: {_format_number(total)}")
+            summary = f"{prefix}{period_label or '지정 기간'} {version} {metric_label} {_aggregation_label(aggregation)}는 {_format_metric_value(total, unit=unit, percent_scale=percent_scale)}이며, 현재 질의는 총량 수준을 확인하는 용도에 적합합니다."
+            data_lines.append(f"- {metric_label} {_aggregation_label(aggregation)}: {_format_metric_value(total, unit=unit, percent_scale=percent_scale)}")
+            data_lines.append(f"- 평균 기준값: {_format_metric_value(total, unit=unit, percent_scale=percent_scale)}")
             data_lines.append("- 집계 대상 건수: 1건")
             aux = by_role.get("aux")
             if aux:
@@ -822,7 +888,7 @@ def render_answer_rule_based(
     if not data_lines:
         data_lines.append("- 조회 결과가 없습니다.")
 
-    agg = str(slots.get("aggregation") or "sum")
+    agg = aggregation
     agg_label = _aggregation_label(agg)
     dim = str(slots.get("dimension") or "-")
     version = _version_hint_from_slots(slots)

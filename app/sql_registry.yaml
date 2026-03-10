@@ -67,9 +67,10 @@ metrics:
     value_column: CUM_TG
     semantic_type: ratio
     default_aggregation: avg
-    allowed_aggregations: ["avg", "max", "min", "weighted_avg"]
+    allowed_aggregations: ["avg", "max", "min", "latest"]
     numerator_column: CUM_TG
     denominator_column: WHIN_NET_MEQ
+    percent_scale: fraction
     unit: "%"
     description: "수율 %"    
   inventory_snapshot:

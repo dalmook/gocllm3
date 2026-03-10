@@ -93,6 +93,7 @@ class SQLMetricSpec:
     allowed_aggregations: List[str] = field(default_factory=lambda: ["sum", "avg", "max", "min", "latest"])
     numerator_column: str = ""
     denominator_column: str = ""
+    percent_scale: str = "percent"
 
 
 @dataclass
@@ -400,6 +401,11 @@ def _normalize_metric_semantic_type(raw: str) -> str:
     return semantic if semantic in _SEMANTIC_DEFAULT_AGGREGATION else "additive"
 
 
+def _normalize_percent_scale(raw: str) -> str:
+    scale = str(raw or "").strip().lower()
+    return scale if scale in {"fraction", "percent"} else "percent"
+
+
 def _resolve_metric_aggregation(metric: SQLMetricSpec, requested: str = "") -> str:
     allowed = [
         _normalize_aggregation_name(x)
@@ -417,7 +423,14 @@ def _resolve_metric_aggregation(metric: SQLMetricSpec, requested: str = "") -> s
 
     req = _normalize_aggregation_name(requested)
     if req and req in allowed:
+        if metric.unit == "%" and req == "sum":
+            print(f"[SQL_REGISTRY] WARN: percent metric '{metric.id}' requested sum -> fallback to avg")
+            if "avg" in allowed:
+                return "avg"
+            return semantic_default if semantic_default in allowed else default_agg
         return req
+    if not req and semantic_type == "ratio" and default_agg == "sum":
+        return semantic_default if semantic_default in allowed else default_agg
     return default_agg
 
 
@@ -534,6 +547,7 @@ def _parse_semantic_sections(data: Dict[str, Any]) -> None:
                 allowed_aggregations=allowed_aggs,
                 numerator_column=str(spec.get("numerator_column") or "").strip(),
                 denominator_column=str(spec.get("denominator_column") or "").strip(),
+                percent_scale=_normalize_percent_scale(spec.get("percent_scale") or "percent"),
             )
             metrics[metric_id] = metric
             alias_map[metric_id.lower()] = metric_id
@@ -1446,6 +1460,8 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
     slot_meta: Dict[str, Any] = {
         "metric": metric_id,
         "metric_unit": metric.unit,
+        "metric_semantic_type": metric.semantic_type,
+        "percent_scale": metric.percent_scale,
         "source_name": source.id,
         "versions": versions,
         "periods": periods,
@@ -1920,7 +1936,7 @@ def _sanitize_slots(raw_slots: Any) -> Dict[str, Any]:
     allowed_keys = {
         "metric", "aggregation", "period_type", "period_value",
         "periods", "period_groups", "dimension", "version", "versions", "compare", "compare_flag", "analysis", "trend",
-        "metric_unit", "source_name", "source", "family", "filters",
+        "metric_unit", "metric_semantic_type", "percent_scale", "source_name", "source", "family", "filters",
     }
     for k, v in raw_slots.items():
         kk = str(k).strip().lower()
@@ -2244,6 +2260,8 @@ def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Di
     metric_spec = _SQL_METRICS.get(str(merged_slots["metric"]))
     if metric_spec:
         merged_slots["metric_unit"] = metric_spec.unit
+        merged_slots["metric_semantic_type"] = metric_spec.semantic_type
+        merged_slots["percent_scale"] = metric_spec.percent_scale
         merged_slots["source_name"] = metric_spec.source
         merged_slots["aggregation"] = _resolve_metric_aggregation(
             metric_spec,

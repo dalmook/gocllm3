@@ -520,11 +520,63 @@ class SqlNluTest(unittest.TestCase):
             slots=tr.get("final_slots") or {},
             period=tr.get("resolved_period") or {},
             results=[
-                {"query_id": "total", "role": "primary", "df": FakeDF([{"VALUE": 98.5}])},
+                {"query_id": "total", "role": "primary", "df": FakeDF([{"VALUE": 0.985}])},
             ],
             period_infer_reason=tr.get("period_infer_reason") or "",
         )
         self.assertIn("수율은(는) 평균 기준입니다.", answer)
+
+    def test_yield_query_uses_avg_not_sum(self):
+        tr = self._analyze("2월 vh 수율 알려줘")
+        slots = tr.get("final_slots") or {}
+        self.assertEqual("CUM_TG", slots.get("metric"))
+        self.assertEqual("avg", slots.get("aggregation"))
+
+    def test_percent_fraction_rendering_uses_percent_not_count(self):
+        answer = render_answer_rule_based(
+            "2월 vh 수율 알려줘",
+            intent="sales_total",
+            slots={
+                "metric": "CUM_TG",
+                "metric_unit": "%",
+                "metric_semantic_type": "ratio",
+                "aggregation": "avg",
+                "percent_scale": "fraction",
+                "versions": ["VH"],
+                "source_name": "psi_simul",
+                "filters": {},
+            },
+            period={"start_yyyymm": "202602", "end_yyyymm": "202602", "label": "2월"},
+            results=[{"query_id": "total", "role": "primary", "df": FakeDF([{"VALUE": 0.4}])}],
+            period_infer_reason="",
+        )
+        self.assertIn("VH 수율은 평균 40.0%입니다.", answer)
+        self.assertNotIn("수율 합계", answer)
+        self.assertNotIn("0.4개", answer)
+        self.assertNotIn("수율 합계 0.4개", answer)
+
+    def test_percent_percent_rendering_uses_percent_not_count(self):
+        answer = render_answer_rule_based(
+            "2월 vh 수율 알려줘",
+            intent="sales_total",
+            slots={
+                "metric": "CUM_TG",
+                "metric_unit": "%",
+                "metric_semantic_type": "ratio",
+                "aggregation": "avg",
+                "percent_scale": "percent",
+                "versions": ["VH"],
+                "source_name": "psi_simul",
+                "filters": {},
+            },
+            period={"start_yyyymm": "202602", "end_yyyymm": "202602", "label": "2월"},
+            results=[{"query_id": "total", "role": "primary", "df": FakeDF([{"VALUE": 40.0}])}],
+            period_infer_reason="",
+        )
+        self.assertIn("VH 수율은 평균 40.0%입니다.", answer)
+        self.assertNotIn("수율 합계", answer)
+        self.assertNotIn("0.4개", answer)
+        self.assertNotIn("수율 합계 0.4개", answer)
 
 
 if __name__ == "__main__":

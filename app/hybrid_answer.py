@@ -115,7 +115,7 @@ def _build_condition_line(context: Optional[dict]) -> str:
         "avg": "평균",
         "max": "최대",
         "min": "최소",
-        "latest": "최신 스냅샷",
+        "latest": "최신",
         "weighted_avg": "가중평균",
     }
     agg_label = agg_map.get(agg, agg)
