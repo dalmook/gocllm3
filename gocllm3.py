@@ -11,7 +11,7 @@ import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from collections import defaultdict
 
 import requests
@@ -758,7 +758,13 @@ DATE_FIELD_CANDIDATES = [
     "updated_at", "updated_date", "last_updated", "last_modified",
     "modified_at", "modified_date", "created_at", "created_date",
     "register_date", "reg_date", "date", "datetime", "timestamp",
-    "mail_date", "page_updated_at", "page_created_at"
+    "mail_date", "page_updated_at", "page_created_at",
+    "ingested_at", "ingest_at", "ingested_time", "indexed_at", "index_time",
+]
+
+INGESTED_DATE_FIELD_CANDIDATES = [
+    "ingested_at", "ingest_at", "ingested_time", "indexed_at", "index_time",
+    "inserted_at", "loaded_at", "etl_loaded_at",
 ]
 def _truncate_text(s: str, max_chars: int = 2200) -> str:
     s = (s or "").strip()
@@ -842,6 +848,40 @@ def _extract_doc_datetime(doc: Dict[str, Any]) -> Optional[datetime]:
             if dt:
                 return dt
     return None
+
+
+def _extract_doc_ingested_datetime(doc: Dict[str, Any]) -> Optional[datetime]:
+    if not isinstance(doc, dict):
+        return None
+    for key in INGESTED_DATE_FIELD_CANDIDATES:
+        if key in doc:
+            dt = _parse_doc_datetime_value(doc.get(key))
+            if dt:
+                return dt
+    meta = doc.get("metadata")
+    if isinstance(meta, dict):
+        for key in INGESTED_DATE_FIELD_CANDIDATES:
+            if key in meta:
+                dt = _parse_doc_datetime_value(meta.get(key))
+                if dt:
+                    return dt
+    for k, v in doc.items():
+        lk = str(k).lower()
+        if any(token in lk for token in ("ingest", "index", "loaded", "etl")):
+            dt = _parse_doc_datetime_value(v)
+            if dt:
+                return dt
+    return _extract_doc_datetime(doc)
+
+
+def _is_doc_nav_learning_query(question: str) -> bool:
+    q = re.sub(r"\s+", "", (question or "").lower())
+    return any(tok in q for tok in ("학습한문서", "학습문서", "금주에학습", "최근학습", "최신학습"))
+
+
+def _is_doc_nav_title_only_query(question: str) -> bool:
+    q = re.sub(r"\s+", "", (question or "").lower())
+    return any(tok in q for tok in ("문서제목", "제목알려", "문서목록", "목록알려", "무슨문서", "어떤문서"))
 
 
 def _get_week_range(base_dt: datetime, week_offset: int = 0) -> Tuple[datetime, datetime]:
@@ -1006,10 +1046,13 @@ def _filter_docs_by_datetime_range(
     documents: List[Dict[str, Any]],
     start_dt: datetime,
     end_dt: datetime,
+    *,
+    datetime_extractor: Optional[Callable[[Dict[str, Any]], Optional[datetime]]] = None,
 ) -> List[Dict[str, Any]]:
+    extractor = datetime_extractor or _extract_doc_datetime
     filtered: List[Dict[str, Any]] = []
     for doc in documents:
-        dt = _extract_doc_datetime(doc)
+        dt = extractor(doc)
         if not dt:
             continue
         if dt.tzinfo is None:
@@ -1020,7 +1063,12 @@ def _filter_docs_by_datetime_range(
     return filtered
 
 
-def rerank_rag_documents(documents: List[Dict[str, Any]], prefer_recent: bool = False) -> List[Dict[str, Any]]:
+def rerank_rag_documents(
+    documents: List[Dict[str, Any]],
+    prefer_recent: bool = False,
+    *,
+    datetime_extractor: Optional[Callable[[Dict[str, Any]], Optional[datetime]]] = None,
+) -> List[Dict[str, Any]]:
     if not documents:
         return []
     merged: Dict[str, Dict[str, Any]] = {}
@@ -1049,10 +1097,11 @@ def rerank_rag_documents(documents: List[Dict[str, Any]], prefer_recent: bool = 
     docs = list(merged.values())
     max_vec = max([float(d.get("_vector_score") or 0.0) for d in docs] or [1.0])
     now = datetime.now(ZoneInfo("Asia/Seoul"))
+    extractor = datetime_extractor or _extract_doc_datetime
     for d in docs:
         vec = float(d.get("_vector_score") or 0.0)
         vec_norm = vec / max_vec if max_vec > 0 else 0.0
-        dt = _extract_doc_datetime(d)
+        dt = extractor(d)
         if dt:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=ZoneInfo("Asia/Seoul"))
@@ -1301,6 +1350,56 @@ def format_rag_context(documents: List[Dict[str, Any]], max_docs: int = 3) -> st
             f"출처: {url}"
         )
     return "\n\n".join(context_parts)
+
+
+def build_doc_nav_answer(
+    *,
+    question: str,
+    documents: List[Dict[str, Any]],
+    max_docs: int = 10,
+    learning_based: bool = False,
+) -> str:
+    docs = list(documents or [])[:max_docs]
+    if not docs:
+        return "\n".join(
+            [
+                "📌 한줄 요약",
+                "- 조건에 맞는 문서를 찾지 못했습니다.",
+                "",
+                "📂 문서 목록(최신순)",
+                "- 조회 결과가 없습니다.",
+            ]
+        )
+
+    title_only = _is_doc_nav_title_only_query(question)
+    date_label = "학습일시" if learning_based else "문서일시"
+    lines: List[str] = []
+    for idx, doc in enumerate(docs, 1):
+        title = str(doc.get("title") or doc.get("doc_id") or "제목 없음").strip()
+        doc_date = str(doc.get("_doc_date") or "날짜 정보 없음")
+        url = str(doc.get("confluence_mail_page_url") or doc.get("url") or "").strip()
+        line = f"- {idx}) {title} | {date_label}: {doc_date}"
+        if url:
+            line += f" | 링크: {url}"
+        lines.append(line)
+
+    summary_label = "학습 문서 제목" if learning_based else "문서 제목"
+    answer = [
+        "📌 한줄 요약",
+        f"- 최신순 {summary_label} {len(docs)}건입니다.",
+        "",
+        "📂 문서 목록(최신순)",
+        *lines,
+    ]
+    if not title_only:
+        answer.extend(
+            [
+                "",
+                "💡 참고",
+                "- 제목 중심으로 정렬해 제공했습니다. 필요하면 특정 문서 내용을 이어서 요약해드릴 수 있습니다.",
+            ]
+        )
+    return "\n".join(answer)
 
 
 def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int, indexes: Optional[List[str]] = None) -> List[Dict[str, Any]]:
@@ -2139,6 +2238,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[RAG] normalized query={normalized_query}")
         print(f"[RAG] glossary_intent={glossary_intent}")
         print(f"[RAG] force_glossary={force_glossary}")
+        doc_nav_mode = final_intent == "doc_nav"
+        doc_summary_mode = final_intent == "doc_summary"
+        doc_nav_learning_mode = doc_nav_mode and _is_doc_nav_learning_query(effective_question)
 
         t_rewrite = time.perf_counter()
         search_queries = build_search_queries(effective_question, llm, memory_text=memory_text, use_memory_for_rewrite=use_memory_for_rewrite)
@@ -2199,15 +2301,18 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             all_mail_docs = []
 
         if time_range and all_mail_docs:
+            time_extractor = _extract_doc_ingested_datetime if doc_nav_learning_mode else _extract_doc_datetime
             ranged_mail_docs = _filter_docs_by_datetime_range(
                 all_mail_docs,
                 time_range["start"],
                 time_range["end"],
+                datetime_extractor=time_extractor,
             )
             if ranged_mail_docs:
                 print(
                     f"[RAG] 메일 기간 필터 적용: {time_range['label']} "
-                    f"{time_range['start']}~{time_range['end']} docs={len(ranged_mail_docs)}"
+                    f"{time_range['start']}~{time_range['end']} docs={len(ranged_mail_docs)} "
+                    f"date_basis={'ingested_at' if doc_nav_learning_mode else 'doc_date'}"
                 )
                 all_mail_docs = ranged_mail_docs
             else:
@@ -2218,6 +2323,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                     all_mail_docs,
                     expanded_start,
                     time_range["end"],
+                    datetime_extractor=time_extractor,
                 )
                 if expanded_mail_docs:
                     print(
@@ -2233,7 +2339,12 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                     all_mail_docs = []
 
         t_rerank = time.perf_counter()
-        reranked_mail_docs = rerank_rag_documents(all_mail_docs, prefer_recent=prefer_recent_docs)[:RAG_NUM_RESULT_DOC]
+        mail_datetime_extractor = _extract_doc_ingested_datetime if doc_nav_learning_mode else _extract_doc_datetime
+        reranked_mail_docs = rerank_rag_documents(
+            all_mail_docs,
+            prefer_recent=prefer_recent_docs,
+            datetime_extractor=mail_datetime_extractor,
+        )[:RAG_NUM_RESULT_DOC]
         reranked_glossary_docs = rerank_rag_documents(all_glossary_docs, prefer_recent=prefer_recent_docs)[:RAG_NUM_RESULT_DOC]
         if weekly_debug.get("weekly_issue_query"):
             reranked_mail_docs = rerank_weekly_issue_docs(
@@ -2337,9 +2448,16 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             from langchain_core.messages import SystemMessage, HumanMessage
             stats["used_rag"] = True
 
-            if final_intent == "hybrid" and sql_summary:
+            if doc_nav_mode:
+                answer = build_doc_nav_answer(
+                    question=effective_question,
+                    documents=selected_docs,
+                    max_docs=10,
+                    learning_based=doc_nav_learning_mode,
+                )
+            elif final_intent == "hybrid" and sql_summary:
                 system_prompt = build_hybrid_prompt(question, sql_summary_text, rag_context)
-            elif issue_summary_intent and ISSUE_SUMMARY_SPEED_MODE:
+            elif doc_summary_mode or (issue_summary_intent and ISSUE_SUMMARY_SPEED_MODE):
                 system_prompt = f"""
 당신은 GOC 업무 지원 챗봇입니다. 아래 [검색 문서]만 근거로 아주 간결하게 답하세요.
 
@@ -2403,37 +2521,45 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 🔗 이슈지 바로가기 👉 https://go/issueG
             """
 
-            messages = [SystemMessage(content=system_prompt)]
-            if memory_text:
-                messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
-            if final_intent == "hybrid" and sql_summary:
-                messages.append(HumanMessage(content=f"[SQL summary]\n{sql_summary_text}"))
-            messages.append(HumanMessage(content=f"[RAG context]\n{rag_context}"))
-            messages.append(HumanMessage(content=question))
-            t_llm = time.perf_counter()
-            response = llm_invoke_with_retry(llm, messages, attempts=1, base_delay=1.5)
-            perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
-            stats["llm_calls"] += 1
-            answer = response.content.strip()
+            if not doc_nav_mode:
+                messages = [SystemMessage(content=system_prompt)]
+                if memory_text:
+                    messages.append(HumanMessage(content=f"[최근 대화 메모리]\n{memory_text}"))
+                if final_intent == "hybrid" and sql_summary:
+                    messages.append(HumanMessage(content=f"[SQL summary]\n{sql_summary_text}"))
+                messages.append(HumanMessage(content=f"[RAG context]\n{rag_context}"))
+                messages.append(HumanMessage(content=question))
+                t_llm = time.perf_counter()
+                response = llm_invoke_with_retry(llm, messages, attempts=1, base_delay=1.5)
+                perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
+                stats["llm_calls"] += 1
+                answer = response.content.strip()
 
-            if "📂 근거 문서" not in answer:
-                source_lines = []
-                for doc in selected_docs[:3]:
-                    title = doc.get("title", "제목 없음")
-                    doc_date = doc.get("_doc_date", "날짜 정보 없음")
-                    url = doc.get("confluence_mail_page_url", "") or doc.get("url", "")
-                    line = f"- {title} | {doc_date}"
-                    if url:
-                        line += f"\n  🔗 GO LINK: {url}"
-                    source_lines.append(line)
-                if source_lines:
-                    answer += "\n\n📂 근거 문서\n" + "\n".join(source_lines)
+                if "📂 근거 문서" not in answer:
+                    source_lines = []
+                    for doc in selected_docs[:3]:
+                        title = doc.get("title", "제목 없음")
+                        doc_date = doc.get("_doc_date", "날짜 정보 없음")
+                        url = doc.get("confluence_mail_page_url", "") or doc.get("url", "")
+                        line = f"- {title} | {doc_date}"
+                        if url:
+                            line += f"\n  🔗 GO LINK: {url}"
+                        source_lines.append(line)
+                    if source_lines:
+                        answer += "\n\n📂 근거 문서\n" + "\n".join(source_lines)
 
-            # 속도 모드(이슈 요약)에서도 이슈지 바로가기 링크를 항상 하단에 고정 노출
-            if issue_summary_intent and ISSUE_SUMMARY_SPEED_MODE and "https://go/issueG" not in answer:
-                answer += "\n\n🔗 이슈지 바로가기 👉 https://go/issueG"
+                # 속도 모드(이슈 요약)에서도 이슈지 바로가기 링크를 항상 하단에 고정 노출
+                if issue_summary_intent and ISSUE_SUMMARY_SPEED_MODE and "https://go/issueG" not in answer:
+                    answer += "\n\n🔗 이슈지 바로가기 👉 https://go/issueG"
         else:
-            if final_intent == "hybrid" and sql_summary:
+            if final_intent == "doc_nav":
+                answer = build_doc_nav_answer(
+                    question=effective_question,
+                    documents=[],
+                    max_docs=10,
+                    learning_based=doc_nav_learning_mode,
+                )
+            elif final_intent == "hybrid" and sql_summary:
                 answer = build_hybrid_fallback_answer(sql_summary, rag_found=False)
             else:
                 from langchain_core.messages import SystemMessage, HumanMessage

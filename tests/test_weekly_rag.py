@@ -10,6 +10,7 @@ from app.search_improvement import (
 
 def test_detect_weekly_issue_query():
     assert detect_weekly_issue_query("이번주 모바일 주요이슈 정리") is True
+    assert detect_weekly_issue_query("지난주 주간 보고에서 1Q 생산 차질 Risk 정리해줘") is True
     assert detect_weekly_issue_query("모바일 담당자 알려줘") is False
 
 

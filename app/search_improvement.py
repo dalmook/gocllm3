@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 WEEKLY_KEYWORDS = ("이번주", "금주", "지난주", "저번주", "전주", "주간", "W")
-ISSUE_KEYWORDS = ("주요이슈", "이슈정리", "현황", "요약", "이슈")
+ISSUE_KEYWORDS = ("주요이슈", "이슈정리", "현황", "요약", "이슈", "주간보고", "주간 보고", "보고서")
 TOPIC_KEYWORDS = ("mobile", "gfx", "flash", "hbm", "dram", "nand")
 
 
