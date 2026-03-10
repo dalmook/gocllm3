@@ -53,6 +53,14 @@ def _metric_label(metric: str) -> str:
     }.get(metric, metric)
 
 
+def _version_hint_from_slots(slots: Dict[str, Any]) -> str:
+    versions = [str(v).strip().upper() for v in ((slots or {}).get("versions") or []) if str(v).strip()]
+    if versions:
+        return ", ".join(versions)
+    version = str((slots or {}).get("version") or "").strip().upper()
+    return version or "전체"
+
+
 def _build_common_criteria_lines(
     *,
     period_label: str = "",
@@ -78,6 +86,27 @@ def _build_common_criteria_lines(
         lines.append(f"- 집계 방식: {agg_label}")
     lines.append(f"- 기준 source: {source_name}")
     lines.append("- 최신 적재 기준으로 조회")
+    return lines
+
+
+def _build_inferred_default_lines(slots: Dict[str, Any], period: Dict[str, Any], period_infer_reason: str = "") -> List[str]:
+    lines: List[str] = []
+    defaults = list((slots or {}).get("inferred_defaults") or []) + list((period or {}).get("inferred_defaults") or [])
+    seen = set()
+    for item in defaults:
+        if not isinstance(item, dict):
+            continue
+        note = str(item.get("note") or "").strip()
+        if not note or note in seen:
+            continue
+        seen.add(note)
+        lines.append(f"- 기본값 적용: {note}")
+    compare_basis = str((slots or {}).get("compare_basis") or (period or {}).get("compare_basis") or "").strip()
+    if compare_basis and compare_basis not in seen:
+        seen.add(compare_basis)
+        lines.append(f"- 비교 기준: {compare_basis}")
+    if period_infer_reason and period_infer_reason not in seen:
+        lines.append(f"- 기본 해석: {period_infer_reason}")
     return lines
 
 
@@ -194,6 +223,7 @@ def render_compare_versions_answer(
     resolved_period_line: str,
     source_name: str,
     filter_text: str = "",
+    default_lines: Optional[List[str]] = None,
 ) -> str:
     if len(rows) < 2:
         lines = [
@@ -289,6 +319,7 @@ def render_compare_versions_answer(
                 source_name=source_name,
                 filter_text=filter_text,
             ),
+            *(default_lines or []),
         ]
     )
 
@@ -307,6 +338,7 @@ def render_trend_answer(
     resolved_period_line: str,
     source_name: str,
     filter_text: str = "",
+    default_lines: Optional[List[str]] = None,
 ) -> str:
     metric_label = _metric_label(metric)
 
@@ -400,6 +432,7 @@ def render_trend_answer(
                 source_name=source_name,
                 filter_text=filter_text,
             ),
+            *(default_lines or []),
         ]
     )
 
@@ -412,6 +445,7 @@ def render_compare_period_groups_answer(
     resolved_period_line: str,
     source_name: str,
     filter_text: str = "",
+    default_lines: Optional[List[str]] = None,
 ) -> str:
     metric_label = _metric_label(metric)
 
@@ -479,6 +513,7 @@ def render_compare_period_groups_answer(
                 source_name=source_name,
                 filter_text=filter_text,
             ),
+            *(default_lines or []),
         ]
     )
 
@@ -492,6 +527,7 @@ def render_grouped_dimension_answer(
     source_name: str,
     dimension: str,
     filter_text: str = "",
+    default_lines: Optional[List[str]] = None,
 ) -> str:
     metric_label = _metric_label(metric)
     dim_label = {
@@ -551,6 +587,7 @@ def render_grouped_dimension_answer(
                 filter_text=filter_text,
                 dimension=dim_label,
             ),
+            *(default_lines or []),
         ]
     )
 
@@ -565,6 +602,7 @@ def render_total_answer(
     source_name: str,
     version_hint: str = "전체",
     filter_text: str = "",
+    default_lines: Optional[List[str]] = None,
 ) -> str:
     total = 0.0
     values: List[float] = []
@@ -605,6 +643,7 @@ def render_total_answer(
                 filter_text=filter_text,
                 version=version_hint,
             ),
+            *(default_lines or []),
         ]
     )
 
@@ -652,6 +691,7 @@ def render_answer_rule_based(
     period_label = _build_exact_period_label(period) or str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
     resolved_period_line = _build_resolved_period_line(period)
     filter_text = _format_filters(dict(slots.get("filters") or {}))
+    default_lines = _build_inferred_default_lines(slots, period, period_infer_reason)
     family = str(slots.get("family") or "")
     primary_query_id = str(primary.get("query_id") or "")
     if not family and primary_query_id:
@@ -666,6 +706,7 @@ def render_answer_rule_based(
             resolved_period_line=resolved_period_line,
             source_name=source_name,
             filter_text=filter_text,
+            default_lines=default_lines,
         )
     if intent == "metric_trend_by_period" or family == "trend_by_period":
         return render_trend_answer(
@@ -675,6 +716,7 @@ def render_answer_rule_based(
             resolved_period_line=resolved_period_line,
             source_name=source_name,
             filter_text=filter_text,
+            default_lines=default_lines,
         )
     if intent == "metric_compare_period_groups" or family == "compare_period_groups":
         return render_compare_period_groups_answer(
@@ -684,6 +726,7 @@ def render_answer_rule_based(
             resolved_period_line=resolved_period_line,
             source_name=source_name,
             filter_text=filter_text,
+            default_lines=default_lines,
         )
     if intent == "metric_grouped_dimension" or family == "grouped_by_dimension":
         return render_grouped_dimension_answer(
@@ -694,6 +737,7 @@ def render_answer_rule_based(
             source_name=source_name,
             dimension=str(slots.get("dimension") or ""),
             filter_text=filter_text,
+            default_lines=default_lines,
         )
     if intent == "sales_compare":
         if primary_rows and (("VERSION" in primary_rows[0]) or ("version" in primary_rows[0])):
@@ -705,6 +749,7 @@ def render_answer_rule_based(
                 resolved_period_line=resolved_period_line,
                 source_name=source_name,
                 filter_text=filter_text,
+                default_lines=default_lines,
             )
         c = _pick_compare_values(primary_rows)
         summary = f"비교 기준 판매량은 현재 {_format_number(c['current'])}, 이전 {_format_number(c['previous'])}입니다."
@@ -741,12 +786,14 @@ def render_answer_rule_based(
                 resolved_period_line=resolved_period_line,
                 source_name=source_name,
                 version_hint="전체",
+                filter_text=filter_text,
+                default_lines=default_lines,
             )
         else:
             total = _pick_scalar_value(primary_rows)
             if total is None:
                 total = 0.0
-            version = str(slots.get("version") or "전체")
+            version = _version_hint_from_slots(slots)
             prefix = f"{filter_text} 기준 " if filter_text else ""
             metric_label = _metric_label(metric)
             summary = f"{prefix}{period_label or '지정 기간'} {version} {metric_label} 합계는 {_format_number(total)}이며, 현재 질의는 총량 수준을 확인하는 용도에 적합합니다."
@@ -765,7 +812,7 @@ def render_answer_rule_based(
     agg = str(slots.get("aggregation") or "sum")
     agg_map = {"sum": "합계", "avg": "평균", "max": "최대", "min": "최소", "count": "건수"}
     dim = str(slots.get("dimension") or "-")
-    version = str(slots.get("version") or "전체")
+    version = _version_hint_from_slots(slots)
     period_label = _build_exact_period_label(period) or str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
 
     lines = [
@@ -776,8 +823,6 @@ def render_answer_rule_based(
     ]
     lines.extend(data_lines)
     lines.extend(["", "🧭 해석 기준"])
-    if period_infer_reason:
-        lines.append(f"- {period_infer_reason}")
     lines.extend(
         _build_common_criteria_lines(
             period_label=period_label,
@@ -789,6 +834,7 @@ def render_answer_rule_based(
             dimension=dim,
         )
     )
+    lines.extend(default_lines)
     lines.extend(["", "🔗 이슈지 바로가기 👉 https://go/issueG"])
     return "\n".join(lines)
 

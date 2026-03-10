@@ -68,10 +68,12 @@ class SqlNluTest(unittest.TestCase):
         tr = self._analyze("VH 판매 몇개야?")
         self.assertEqual("sales_total", tr.get("final_intent"))
         self.assertTrue(tr.get("period_inferred"))
-        self.assertIn("올해 누적", tr.get("period_infer_reason") or "")
+        self.assertIn("최신 완결 월", tr.get("period_infer_reason") or "")
         p = tr.get("resolved_period") or {}
-        self.assertEqual("202601", p.get("start_yyyymm"))
-        self.assertEqual("202612", p.get("end_yyyymm"))
+        self.assertEqual("202602", p.get("start_yyyymm"))
+        self.assertEqual("202602", p.get("end_yyyymm"))
+        defaults = p.get("inferred_defaults") or []
+        self.assertTrue(any("최신 완결 월" in str(x.get("note") or "") for x in defaults))
 
     def test_spacing_variations(self):
         cases = ["올해몇개", "이번분기판매량", "WC올해판매", "버전별판매량"]
@@ -151,6 +153,7 @@ class SqlNluTest(unittest.TestCase):
         self.assertIn("📊 데이터 기반 답변", answer)
         self.assertIn("🧭 해석 기준", answer)
         self.assertNotIn("SALES=", answer)
+        self.assertIn("기본값 적용", answer)
 
     def test_compare_versions_slots_and_params(self):
         tr = self._analyze("2월 vh와 vl 순생산 비교 분석해줘")
@@ -298,6 +301,74 @@ class SqlNluTest(unittest.TestCase):
         params, missing = build_sql_params_with_missing(m, "vh 기준 fam1별 순생산 보여줘")
         self.assertEqual([], missing)
         self.assertEqual("VH", params.get("v1"))
+
+    def test_ambiguous_total_defaults_to_latest_complete_month(self):
+        tr = self._analyze("vh 판매 몇개야")
+        planner = tr.get("planner_plan") or {}
+        self.assertEqual("total", planner.get("analysis_type"))
+        self.assertEqual(["VH"], planner.get("versions") or [])
+        self.assertEqual("202602", (planner.get("applied_periods") or {}).get("start_yyyymm"))
+        self.assertTrue(tr.get("period_inferred"))
+
+    def test_ambiguous_trend_defaults_to_recent_three_months(self):
+        tr = self._analyze("판매 추이 보여줘")
+        planner = tr.get("planner_plan") or {}
+        self.assertEqual("trend", planner.get("analysis_type"))
+        applied = planner.get("applied_periods") or {}
+        self.assertEqual("202601", applied.get("start_yyyymm"))
+        self.assertEqual("202603", applied.get("end_yyyymm"))
+        self.assertTrue(any(x.get("field") == "period" for x in (planner.get("inferred_defaults") or [])))
+
+    def test_ambiguous_grouped_defaults_to_latest_month(self):
+        tr = self._analyze("버전별 판매 알려줘")
+        self.assertEqual("metric_grouped_dimension", tr.get("final_intent"))
+        planner = tr.get("planner_plan") or {}
+        self.assertEqual("grouped", planner.get("analysis_type"))
+        self.assertEqual("version", planner.get("group_by"))
+        self.assertEqual("202602", (planner.get("applied_periods") or {}).get("start_yyyymm"))
+
+    def test_ambiguous_compare_defaults_to_latest_month_vs_prev_month(self):
+        tr = self._analyze("dram 순생산 비교")
+        self.assertEqual("metric_compare_period_groups", tr.get("final_intent"))
+        planner = tr.get("planner_plan") or {}
+        self.assertEqual("compare", planner.get("analysis_type"))
+        self.assertEqual("period_groups", planner.get("compare_target"))
+        self.assertEqual("최신 월 vs 전월", planner.get("compare_basis"))
+        groups = planner.get("period_groups") or []
+        self.assertEqual("202601", groups[0].get("start_yyyymm"))
+        self.assertEqual("202602", groups[1].get("start_yyyymm"))
+        self.assertEqual(["DRAM"], (planner.get("filters") or {}).get("fam1"))
+
+    def test_grouped_question_stays_natural_and_executable(self):
+        tr = self._analyze("vh 기준 fam1별 순생산 보여줘")
+        self.assertEqual("metric_grouped_dimension", tr.get("final_intent"))
+        planner = tr.get("planner_plan") or {}
+        self.assertEqual("grouped", planner.get("analysis_type"))
+        self.assertEqual("fam1", planner.get("group_by"))
+        self.assertEqual(["VH"], planner.get("versions") or [])
+
+    def test_rule_renderer_explains_compare_defaults(self):
+        tr = self._analyze("dram 순생산 비교")
+        answer = render_answer_rule_based(
+            "dram 순생산 비교",
+            intent=tr.get("final_intent") or "metric_compare_period_groups",
+            slots=tr.get("final_slots") or {},
+            period=tr.get("resolved_period") or {},
+            results=[
+                {
+                    "query_id": "compare_groups",
+                    "role": "primary",
+                    "df": FakeDF([
+                        {"PERIOD_GROUP": "2026-01", "VALUE": 90.0},
+                        {"PERIOD_GROUP": "2026-02", "VALUE": 120.0},
+                    ]),
+                },
+            ],
+            period_infer_reason=tr.get("period_infer_reason") or "",
+        )
+        self.assertIn("최신 월 vs 전월", answer)
+        self.assertIn("기본값 적용", answer)
+        self.assertIn("DRAM", answer)
 
     def test_dimension_value_filter_fam1_total(self):
         tr = self._analyze("FAM1 DRAM 순생산 알려줘")

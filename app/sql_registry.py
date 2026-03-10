@@ -286,6 +286,24 @@ def _normalize_version_token(token: str) -> str:
     return raw.upper()
 
 
+def _shift_yyyymm(yyyymm: str, delta: int) -> str:
+    value = str(yyyymm or "")
+    if not re.fullmatch(r"20\d{2}(0[1-9]|1[0-2])", value):
+        return ""
+    year = int(value[:4])
+    month = int(value[4:6])
+    total = (year * 12 + (month - 1)) + delta
+    next_year = total // 12
+    next_month = (total % 12) + 1
+    return f"{next_year:04d}{next_month:02d}"
+
+
+def _latest_complete_yyyymm(now: Optional[datetime] = None) -> str:
+    current = now or datetime.now()
+    this_month = f"{current.year:04d}{current.month:02d}"
+    return _shift_yyyymm(this_month, -1)
+
+
 def normalize_question(text: str) -> str:
     q = (text or "").strip().lower()
     q = re.sub(r"\bv\s*[/\-]?\s*h\b", " vh ", q, flags=re.IGNORECASE)
@@ -990,6 +1008,9 @@ def resolve_periods(question: str, slots: Dict[str, Any], *, now: Optional[datet
 def resolve_period_groups(question: str, slots: Dict[str, Any], *, now: Optional[datetime] = None) -> List[Dict[str, str]]:
     current = now or datetime.now()
     norm = normalize_question(question)
+    seeded = [x for x in ((slots or {}).get("period_groups") or []) if isinstance(x, dict)]
+    if seeded:
+        return seeded
     groups: List[Dict[str, str]] = []
 
     for a, b in re.findall(r"\b(20\d{2})\s*년?\s*대비\s*(20\d{2})\s*년?\b", norm):
@@ -1095,6 +1116,7 @@ def canonicalize_plan(question: str, slots: Dict[str, Any], *, now: Optional[dat
         "periods": periods,
         "period_groups": period_groups,
         "filters": filters,
+        "applied_filters": filters,
         "group_by": group_by,
         "dimension": dimension,
         "analysis_type": analysis_type,
@@ -1104,6 +1126,9 @@ def canonicalize_plan(question: str, slots: Dict[str, Any], *, now: Optional[dat
         "trend": trend,
         "analysis": analysis,
         "family": family,
+        "inferred_defaults": list(slots.get("inferred_defaults") or []),
+        "compare_basis": str(slots.get("compare_basis") or ""),
+        "applied_periods": dict(slots.get("applied_periods") or {}),
         "raw_question": question,
         "normalized_question": norm,
         "intent_hint": str((slots or {}).get("intent_hint") or ""),
@@ -1349,6 +1374,10 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
         "raw_question": str(plan.get("raw_question") or ""),
         "normalized_question": str(plan.get("normalized_question") or ""),
         "filters": {},
+        "applied_filters": dict(plan.get("applied_filters") or {}),
+        "inferred_defaults": list(plan.get("inferred_defaults") or []),
+        "compare_basis": str(plan.get("compare_basis") or ""),
+        "applied_periods": dict(plan.get("applied_periods") or {}),
     }
 
     period_filter = ""
@@ -1702,60 +1731,95 @@ def classify_intent_rule_based(question: str, slots: Dict[str, Any]) -> Tuple[st
     return intent, ambiguous, reasons
 
 
-def infer_default_period(intent: str, slots: Dict[str, Any], question: str) -> Tuple[Dict[str, Any], bool, str]:
+def infer_default_period(intent: str, slots: Dict[str, Any], question: str, *, now: Optional[datetime] = None) -> Tuple[Dict[str, Any], bool, str]:
     merged = dict(slots or {})
-    if merged.get("period_value"):
+    if merged.get("period_value") or merged.get("periods") or merged.get("period_groups"):
         return merged, False, ""
 
     norm = normalize_question(question)
+    current = now or datetime.now()
+    latest_complete = _latest_complete_yyyymm(current)
+    previous_month = _shift_yyyymm(latest_complete, -1)
     reason = ""
     inferred = False
+    inferred_defaults = list(merged.get("inferred_defaults") or [])
 
-    if intent in ("sales_total", "sales_grouped", "metric_grouped_dimension"):
-        merged["period_type"] = "year"
-        merged["period_value"] = "this_year"
-        reason = "기간 지정이 없어 올해 누적 기준으로 조회했습니다."
+    compare_requested = bool(merged.get("compare")) or _extract_compare(norm) != ""
+    trend_requested = bool(merged.get("trend")) or any(tok in norm.replace(" ", "") for tok in ("추이", "트렌드", "흐름"))
+    grouped_requested = bool(merged.get("group_requested")) or any(tok in norm.replace(" ", "") for tok in _GROUP_BY_HINTS)
+    versions = [str(v).strip().upper() for v in (merged.get("versions") or []) if str(v).strip()]
+    dimension = str(merged.get("dimension") or "").strip().lower()
+    analysis_hint = "total"
+    if grouped_requested and dimension and not versions and not merged.get("period_groups"):
+        analysis_hint = "grouped"
+    elif compare_requested:
+        analysis_hint = "compare"
+    elif trend_requested:
+        analysis_hint = "trend"
+    elif grouped_requested or dimension in {"version", "fam1", "app", "yearmonth", "quarter"}:
+        analysis_hint = "grouped"
+
+    def add_default(field: str, applied: str, note: str) -> None:
+        inferred_defaults.append({"field": field, "applied": applied, "note": note})
+
+    if analysis_hint == "grouped" and not dimension:
+        merged["dimension"] = "version"
+        add_default("group_by", "version", "그룹 차원이 없어 버전별 기준으로 조회했습니다.")
         inferred = True
-    elif intent in ("sales_trend", "metric_trend_by_period"):
-        merged["period_type"] = "relative"
-        merged["period_value"] = "recent_3_months"
-        if not merged.get("dimension"):
-            merged["dimension"] = "month"
-        reason = "기간 지정이 없어 최근 3개월 추이로 해석했습니다."
-        inferred = True
-    elif intent == "sales_compare":
-        merged["period_type"] = "quarter"
-        merged["period_value"] = "this_quarter"
-        if not merged.get("compare"):
-            merged["compare"] = "prev_quarter"
-        reason = "기준 기간이 없어 이번 분기 대비 전분기로 해석했습니다."
-        inferred = True
-    elif intent == "metric_compare_versions":
+
+    if analysis_hint == "compare" and not versions and not merged.get("period_groups"):
+        current_label = _format_yyyymm_for_group(latest_complete)
+        current_group = {"label": current_label, "start_yyyymm": latest_complete, "end_yyyymm": latest_complete}
+        previous_group = {"label": _format_yyyymm_for_group(previous_month), "start_yyyymm": previous_month, "end_yyyymm": previous_month}
         merged["period_type"] = "month"
-        merged["period_value"] = "this_month"
-        reason = "기간 지정이 없어 이번달 기준으로 버전 비교를 조회했습니다."
+        merged["period_value"] = latest_complete
+        merged["compare"] = merged.get("compare") or "prev_month"
+        merged["period_groups"] = [previous_group, current_group]
+        merged["compare_basis"] = "최신 월 vs 전월"
+        add_default("period", f"latest_complete_month:{latest_complete}", f"비교 대상이 없어 최신 완결 월({current_label})과 전월을 비교했습니다.")
+        add_default("compare_basis", "latest_month_vs_prev_month", "비교 대상이 없어 최신 월 vs 전월 기준을 적용했습니다.")
         inferred = True
-    elif intent == "metric_compare_period_groups":
-        merged["period_type"] = "year"
-        merged["period_value"] = "this_year"
-        if not merged.get("period_groups"):
-            yy = datetime.now().year
-            merged["period_groups"] = [
-                {"label": str(yy - 1), "start_yyyymm": f"{yy-1:04d}01", "end_yyyymm": f"{yy-1:04d}12"},
-                {"label": str(yy), "start_yyyymm": f"{yy:04d}01", "end_yyyymm": f"{yy:04d}12"},
-            ]
-        reason = "비교 기간이 명확하지 않아 작년 대비 올해 기준으로 조회했습니다."
+        reason = f"비교 대상이 없어 최신 완결 월({current_label})과 전월을 비교했습니다."
+    elif analysis_hint == "compare" and versions:
+        merged["period_type"] = "month"
+        merged["period_value"] = latest_complete
+        merged["compare_basis"] = "최신 완결 월 단일 기준"
+        add_default("period", f"latest_complete_month:{latest_complete}", f"기간 지정이 없어 최신 완결 월({_format_yyyymm_for_group(latest_complete)}) 기준으로 비교했습니다.")
         inferred = True
-
-    if not inferred and any(x in norm for x in ("어때", "흐름", "추이")) and not merged.get("period_value"):
+        reason = f"기간 지정이 없어 최신 완결 월({_format_yyyymm_for_group(latest_complete)}) 기준으로 비교했습니다."
+    elif analysis_hint == "trend":
         merged["period_type"] = "relative"
         merged["period_value"] = "recent_3_months"
         if not merged.get("dimension"):
-            merged["dimension"] = "month"
-        reason = "기간 지정이 없어 최근 3개월 추이로 해석했습니다."
+            merged["dimension"] = "yearmonth"
+        merged["compare_basis"] = ""
+        add_default("period", "recent_3_months", "기간 지정이 없어 최근 3개월 추이로 해석했습니다.")
         inferred = True
+        reason = "기간 지정이 없어 최근 3개월 추이로 해석했습니다."
+    elif analysis_hint == "grouped":
+        merged["period_type"] = "month"
+        merged["period_value"] = latest_complete
+        add_default("period", f"latest_complete_month:{latest_complete}", f"기간 지정이 없어 최신 완결 월({_format_yyyymm_for_group(latest_complete)}) 기준으로 조회했습니다.")
+        inferred = True
+        reason = f"기간 지정이 없어 최신 완결 월({_format_yyyymm_for_group(latest_complete)}) 기준으로 조회했습니다."
+    else:
+        merged["period_type"] = "month"
+        merged["period_value"] = latest_complete
+        add_default("period", f"latest_complete_month:{latest_complete}", f"기간 지정이 없어 최신 완결 월({_format_yyyymm_for_group(latest_complete)}) 기준으로 조회했습니다.")
+        inferred = True
+        reason = f"기간 지정이 없어 최신 완결 월({_format_yyyymm_for_group(latest_complete)}) 기준으로 조회했습니다."
+
+    if inferred_defaults:
+        merged["inferred_defaults"] = inferred_defaults
 
     return merged, inferred, reason
+
+
+def _format_yyyymm_for_group(yyyymm: str) -> str:
+    value = str(yyyymm or "")
+    if re.fullmatch(r"20\d{2}(0[1-9]|1[0-2])", value):
+        return f"{value[:4]}-{value[4:]}"
+    return value
 
 
 def _sanitize_slots(raw_slots: Any) -> Dict[str, Any]:
@@ -2109,11 +2173,22 @@ def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Di
         merged_slots["filters"].pop("version", None)
     if len(merged_slots.get("versions") or []) >= 2:
         merged_slots["compare"] = True
-    merged_slots, period_inferred, period_infer_reason = infer_default_period(final_intent, merged_slots, question)
+    merged_slots, period_inferred, period_infer_reason = infer_default_period(final_intent, merged_slots, question, now=now)
     trace["period_inferred"] = period_inferred
     trace["period_infer_reason"] = period_infer_reason
 
     period = resolve_period_slots(merged_slots, now=now)
+    merged_slots["applied_periods"] = {
+        "period_type": period.period_type,
+        "period_value": period.period_value,
+        "start_yyyymm": period.start_yyyymm,
+        "end_yyyymm": period.end_yyyymm,
+        "anchor_yyyymm": period.anchor_yyyymm,
+        "label": period.label,
+        "compare_start_yyyymm": period.compare_start_yyyymm,
+        "compare_end_yyyymm": period.compare_end_yyyymm,
+    }
+    merged_slots["applied_filters"] = dict(merged_slots.get("filters") or {})
     trace["resolved_period"] = {
         "type": period.period_type,
         "value": period.period_value,
@@ -2124,10 +2199,16 @@ def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Di
         "ambiguous_adjusted": period.ambiguous_adjusted,
         "compare_start_yyyymm": period.compare_start_yyyymm,
         "compare_end_yyyymm": period.compare_end_yyyymm,
+        "inferred_defaults": list(merged_slots.get("inferred_defaults") or []),
+        "compare_basis": str(merged_slots.get("compare_basis") or ""),
     }
 
     planner_plan = build_execution_plan_from_slots(question, merged_slots, now=now)
     planner_plan["intent_hint"] = final_intent
+    planner_plan["applied_periods"] = dict(merged_slots.get("applied_periods") or {})
+    planner_plan["applied_filters"] = dict(merged_slots.get("applied_filters") or {})
+    planner_plan["inferred_defaults"] = list(merged_slots.get("inferred_defaults") or [])
+    planner_plan["compare_basis"] = str(merged_slots.get("compare_basis") or "")
     if planner_plan.get("source") and planner_plan.get("metric") and planner_plan.get("family"):
         built_match = build_sql_from_plan(
             planner_plan,
