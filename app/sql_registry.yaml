@@ -30,6 +30,8 @@ sources:
         description: "순생산 수량"
       WHIN_NET_MEQ:
         description: "순입고 수량"
+      CUM_TG:
+        description: "수율 %"        
 
 metrics:
   sales:
@@ -50,6 +52,12 @@ metrics:
     value_column: WHIN_NET_MEQ
     unit: "MEQ"
     description: "순입고 수량"
+  CUM_TG:
+    aliases: ["수율", "yld", "tg", "cum"]
+    source: psi_simul
+    value_column: CUM_TG
+    unit: "%"
+    description: "수율 %"    
 
 dimensions:
   version:
