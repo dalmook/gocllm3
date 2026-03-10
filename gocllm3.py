@@ -611,7 +611,7 @@ def render_sql_answer_with_llm(llm, prompt: str) -> Optional[str]:
 class RagClient:
     """RAG API 클라이언트"""
 
-    def __init__(self, api_key: str, dep_ticket: str, base_url: str, timeout: int = 30):
+    def __init__(self, api_key: str, dep_ticket: str, base_url: str, timeout: Tuple[int, int] = (5, 60)):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.sess = requests.Session()
@@ -678,6 +678,42 @@ def sanitize_query(query: str) -> str:
     return cleaned
 
 
+def _normalize_rag_indexes(indexes: Optional[List[str]]) -> List[str]:
+    raw_indexes = indexes if indexes is not None else [x.strip() for x in RAG_INDEXES.split(",") if x.strip()]
+    normalized: List[str] = []
+    for item in raw_indexes:
+        for index in str(item or "").split(","):
+            cleaned = index.strip()
+            if cleaned and cleaned not in normalized:
+                normalized.append(cleaned)
+    return normalized
+
+
+def _compute_rag_fallback_top_k(top_k: int) -> int:
+    capped_top_k = min(max(1, int(top_k)), RAG_API_MAX_NUM_RESULT_DOC)
+    if capped_top_k <= 1:
+        return 1
+    return max(1, math.ceil(capped_top_k / 2))
+
+
+def _log_rag_retrieve_event(
+    *,
+    stage: str,
+    query: str,
+    indexes: List[str],
+    top_k: int,
+    elapsed_sec: float,
+    timeout_hit: bool,
+    level: str = "INFO",
+    detail: str = "",
+):
+    suffix = f" detail={detail}" if detail else ""
+    print(
+        f"[RAG Retrieve {level}] stage={stage} query={query!r} indexes={indexes} "
+        f"top_k={top_k} elapsed_sec={elapsed_sec:.3f} timeout={timeout_hit}{suffix}"
+    )
+
+
 def search_rag_documents(
     query: str,
     indexes: Optional[List[str]] = None,
@@ -685,7 +721,8 @@ def search_rag_documents(
     top_k: Optional[int] = None,
     mode: Optional[str] = None,
     filter: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+    return_meta: bool = False,
+) -> Any:
     """
     RAG 문서 검색 (다중 인덱스 지원)
     
@@ -696,12 +733,22 @@ def search_rag_documents(
     Returns:
         검색 결과 문서 목록
     """
-    if indexes is None:
-        indexes = [x.strip() for x in RAG_INDEXES.split(",") if x.strip()]
+    indexes = _normalize_rag_indexes(indexes)
     
     sanitized_query = sanitize_query(query)
+    metadata: Dict[str, Any] = {
+        "query": query,
+        "sanitized_query": sanitized_query,
+        "timeout_occurred": False,
+        "fallback_used": False,
+        "user_notice": "",
+        "attempts": [],
+        "effective_indexes": indexes[:],
+        "effective_top_k": None,
+    }
     if not sanitized_query:
-        return []
+        empty_result = {"documents": [], "metadata": metadata}
+        return empty_result if return_meta else []
 
     print(f"[RAG Search] Query(raw): {query}")
     print(f"[RAG Search] Query(sanitized): {sanitized_query}")
@@ -715,42 +762,131 @@ def search_rag_documents(
         print(f"[RAG Search] Num Result Doc: {num_result_doc}")
     
     rag_client = create_rag_client()
-    all_results = []
-    
-    for index in indexes:
-        try:
-            print(f"[RAG Search] Searching index: {index}")
-            result = rag_client.retrieve(
-                index_name=index,
-                query_text=sanitized_query,
-                mode=mode or RAG_RETRIEVE_MODE,
-                num_result_doc=num_result_doc,
-                permission_groups=[RAG_PERMISSION_GROUPS],
-                filter=filter,
-                bm25_boost=RAG_BM25_BOOST,
-                knn_boost=RAG_KNN_BOOST,
+    all_results: List[Dict[str, Any]] = []
+    primary_timeout_results: List[Dict[str, Any]] = []
+    fallback_index = indexes[0] if indexes else ""
+    fallback_top_k = _compute_rag_fallback_top_k(num_result_doc)
+    attempts = [
+        {"stage": "primary", "indexes": indexes[:], "top_k": num_result_doc},
+    ]
+    if fallback_index:
+        attempts.append({"stage": "fallback", "indexes": [fallback_index], "top_k": fallback_top_k})
+
+    for attempt in attempts:
+        stage = attempt["stage"]
+        stage_indexes = attempt["indexes"]
+        stage_top_k = attempt["top_k"]
+        stage_started_at = time.perf_counter()
+        stage_results: List[Dict[str, Any]] = []
+        stage_timeout = False
+
+        for index in stage_indexes:
+            request_started_at = time.perf_counter()
+            try:
+                print(f"[RAG Search] Searching index: {index} stage={stage}")
+                result = rag_client.retrieve(
+                    index_name=index,
+                    query_text=sanitized_query,
+                    mode=mode or RAG_RETRIEVE_MODE,
+                    num_result_doc=stage_top_k,
+                    permission_groups=[RAG_PERMISSION_GROUPS],
+                    filter=filter,
+                    bm25_boost=RAG_BM25_BOOST,
+                    knn_boost=RAG_KNN_BOOST,
+                )
+                request_elapsed = time.perf_counter() - request_started_at
+                _log_rag_retrieve_event(
+                    stage=stage,
+                    query=sanitized_query,
+                    indexes=[index],
+                    top_k=stage_top_k,
+                    elapsed_sec=request_elapsed,
+                    timeout_hit=False,
+                )
+                if "hits" in result and isinstance(result["hits"], dict):
+                    hits = result["hits"].get("hits", [])
+                    for hit in hits:
+                        if "_source" in hit:
+                            doc = hit["_source"]
+                            doc["_index"] = index
+                            doc["_score"] = hit.get("_score", 0)
+                            stage_results.append(doc)
+                    print(f"[RAG Search] Found {len(hits)} documents in {index}")
+                else:
+                    print(f"[RAG Search] No 'hits' field in response from {index}")
+            except requests.exceptions.ReadTimeout as e:
+                request_elapsed = time.perf_counter() - request_started_at
+                stage_timeout = True
+                metadata["timeout_occurred"] = True
+                _log_rag_retrieve_event(
+                    stage=stage,
+                    query=sanitized_query,
+                    indexes=[index],
+                    top_k=stage_top_k,
+                    elapsed_sec=request_elapsed,
+                    timeout_hit=True,
+                    level="WARN",
+                    detail=str(e),
+                )
+                continue
+            except Exception as e:
+                request_elapsed = time.perf_counter() - request_started_at
+                _log_rag_retrieve_event(
+                    stage=stage,
+                    query=sanitized_query,
+                    indexes=[index],
+                    top_k=stage_top_k,
+                    elapsed_sec=request_elapsed,
+                    timeout_hit=False,
+                    level="ERROR",
+                    detail=str(e),
+                )
+                import traceback
+                traceback.print_exc()
+                continue
+
+        stage_elapsed = time.perf_counter() - stage_started_at
+        metadata["attempts"].append({
+            "stage": stage,
+            "indexes": stage_indexes[:],
+            "top_k": stage_top_k,
+            "elapsed_sec": round(stage_elapsed, 3),
+            "timeout_occurred": stage_timeout,
+            "result_count": len(stage_results),
+        })
+
+        if stage == "primary" and stage_timeout and len(attempts) > 1:
+            primary_timeout_results = stage_results[:]
+            print(
+                f"[RAG Search] ReadTimeout detected. retrying with narrowed scope: "
+                f"indexes={[fallback_index]} top_k={fallback_top_k}"
             )
-            # print(f"[RAG Search] Result from {index}: {result}")
-            # 결과에서 문서 추출 (Elasticsearch 응답 구조: hits.hits)
-            if "hits" in result and isinstance(result["hits"], dict):
-                hits = result["hits"].get("hits", [])
-                for hit in hits:
-                    if "_source" in hit:
-                        doc = hit["_source"]
-                        doc["_index"] = index  # 인덱스 정보 추가
-                        doc["_score"] = hit.get("_score", 0)  # 점수 추가
-                        all_results.append(doc)
-                print(f"[RAG Search] Found {len(hits)} documents in {index}")
-            else:
-                print(f"[RAG Search] No 'hits' field in response from {index}")
-        except Exception as e:
-            print(f"[RAG Search Error] Index: {index}, Error: {e}")
-            import traceback
-            traceback.print_exc()
+            metadata["fallback_used"] = True
+            metadata["user_notice"] = "문서 검색 응답이 지연되어 범위를 줄여 재조회했습니다."
             continue
-    
+
+        if stage_results:
+            all_results = stage_results
+            metadata["effective_indexes"] = stage_indexes[:]
+            metadata["effective_top_k"] = stage_top_k
+            if stage == "fallback":
+                metadata["fallback_used"] = True
+                metadata["user_notice"] = "문서 검색 응답이 지연되어 범위를 줄여 재조회했습니다."
+            break
+
+        if not stage_timeout:
+            metadata["effective_indexes"] = stage_indexes[:]
+            metadata["effective_top_k"] = stage_top_k
+            break
+
+    if not all_results and primary_timeout_results:
+        all_results = primary_timeout_results
+        metadata["effective_indexes"] = indexes[:]
+        metadata["effective_top_k"] = num_result_doc
+
     print(f"[RAG Search] Total results: {len(all_results)}")
-    return all_results
+    result_payload = {"documents": all_results, "metadata": metadata}
+    return result_payload if return_meta else all_results
 
 
 DATE_FIELD_CANDIDATES = [
@@ -1402,28 +1538,58 @@ def build_doc_nav_answer(
     return "\n".join(answer)
 
 
-def retrieve_rag_documents_parallel(queries: List[str], *, top_k: int, indexes: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+def retrieve_rag_documents_parallel(
+    queries: List[str],
+    *,
+    top_k: int,
+    indexes: Optional[List[str]] = None,
+    return_meta: bool = False,
+) -> Any:
     query_list = [q.strip() for q in queries if q and q.strip()]
     if not query_list:
-        return []
+        empty_payload = {"documents": [], "metadata": {"queries": [], "timeout_occurred": False, "fallback_used": False, "user_notice": ""}}
+        return empty_payload if return_meta else []
 
     all_documents: List[Dict[str, Any]] = []
+    aggregated_meta: Dict[str, Any] = {
+        "queries": [],
+        "timeout_occurred": False,
+        "fallback_used": False,
+        "user_notice": "",
+    }
     max_workers = min(len(query_list), MAX_RAG_QUERIES, 2)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
-            executor.submit(search_rag_documents, query, indexes=indexes, top_k=top_k, mode=RAG_RETRIEVE_MODE): query
+            executor.submit(
+                search_rag_documents,
+                query,
+                indexes=indexes,
+                top_k=top_k,
+                mode=RAG_RETRIEVE_MODE,
+                return_meta=True,
+            ): query
             for query in query_list
         }
         for future in as_completed(future_map):
             query = future_map[future]
             try:
-                docs = future.result()
+                result = future.result()
+                docs = result.get("documents", [])
+                metadata = result.get("metadata", {})
                 print(f"[RAG] 병렬 검색 완료: query={query} docs={len(docs)}")
                 all_documents.extend(docs)
+                aggregated_meta["queries"].append(metadata)
+                if metadata.get("timeout_occurred"):
+                    aggregated_meta["timeout_occurred"] = True
+                if metadata.get("fallback_used"):
+                    aggregated_meta["fallback_used"] = True
+                if metadata.get("user_notice"):
+                    aggregated_meta["user_notice"] = str(metadata.get("user_notice"))
             except Exception as e:
                 print(f"[RAG] 병렬 검색 실패: query={query} err={e}")
 
-    return all_documents
+    payload = {"documents": all_documents, "metadata": aggregated_meta}
+    return payload if return_meta else all_documents
 
 
 LLM_BUSY_MESSAGE = "지금 답변 생성 중입니다. 완료 후 다시 질문해주세요."
@@ -1962,6 +2128,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
     selected_docs: List[Dict[str, Any]] = []
     weekly_debug: Dict[str, Any] = {}
     search_queries: List[str] = []
+    rag_retrieval_meta: Dict[str, Any] = {}
 
     def _send_answer_with_feedback_card(answer_text: str):
         nonlocal success_flag
@@ -2287,13 +2454,18 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         )
 
         t_rag = time.perf_counter()
-        all_rag_documents = retrieve_rag_documents_parallel(
+        rag_retrieval = retrieve_rag_documents_parallel(
             search_queries,
             top_k=retrieve_top_k,
             indexes=target_indexes,
+            return_meta=True,
         )
+        all_rag_documents = rag_retrieval.get("documents", [])
+        rag_retrieval_meta = rag_retrieval.get("metadata", {})
         perf["rag_fetch_ms"] = (time.perf_counter() - t_rag) * 1000
         stats["rag_calls"] = len(search_queries)
+        if rag_retrieval_meta.get("fallback_used"):
+            stats["fallback_reason"] = "rag_read_timeout_fallback"
 
         all_mail_docs = [d for d in all_rag_documents if d.get("_index") == MAIL_INDEX_NAME]
         all_glossary_docs = [d for d in all_rag_documents if d.get("_index") == GLOSSARY_INDEX_NAME]
@@ -2591,6 +2763,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             f"[RAG Final] selected_rag_domain={selected_rag_domain} used_rag={stats['used_rag']} "
             f"fallback_reason={stats.get('fallback_reason','')}"
         )
+        rag_user_notice = str(rag_retrieval_meta.get("user_notice") or "").strip()
+        if rag_user_notice and rag_user_notice not in answer:
+            answer = f"📋 검색 안내\n- {rag_user_notice}\n\n{answer}"
         if force_glossary_mode:
             answer = _sanitize_glossary_answer(answer)
         print(f"[HYBRID] sql_used={sql_used} rag_used={stats['used_rag']}")
@@ -2644,6 +2819,10 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             top_doc = selected_docs[0] if selected_docs else {}
             debug_json = {
                 "search_queries": search_queries[:8],
+                "rag_timeout_occurred": bool(rag_retrieval_meta.get("timeout_occurred")),
+                "rag_fallback_used": bool(rag_retrieval_meta.get("fallback_used")),
+                "rag_user_notice": str(rag_retrieval_meta.get("user_notice") or ""),
+                "rag_query_meta": rag_retrieval_meta.get("queries") or [],
                 "weekly_issue_query": bool(weekly_debug.get("weekly_issue_query")),
                 "extracted_period_label": weekly_debug.get("extracted_period_label") or "",
                 "detected_topic": weekly_debug.get("detected_topic") or "",
