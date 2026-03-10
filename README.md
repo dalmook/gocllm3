@@ -34,26 +34,31 @@
 `/sql ...` 입력은 metadata-driven planner를 우선 사용하고, 필요 시 legacy query fallback을 사용합니다.
 
 1. `normalize_question(question)`
-2. `extract_slots_rule_based(question, now=...)`
-3. `classify_intent_rule_based(question, slots)`
-4. 모호한 경우에만 LLM 기반 SQL intent classifier 보조 사용
-5. `resolve_metric`, `resolve_versions`, `resolve_filters`, `resolve_periods`, `resolve_period_groups`
-6. `infer_default_period(...)`로 기간 미지정 질문 보정
-7. `resolve_period_slots(...)`로 실제 적용 기간 계산
-8. `build_sql_from_plan(...)`로 common plan 기반 SQL 조립
-9. `build_execution_plan(...)`로 primary/aux 조회 계획 생성
-10. 실행 결과를 `render_answer_rule_based()` 또는 `render_answer_with_llm()`로 응답화
+2. 공통 synonym/alias canonicalization
+3. `extract_slots_rule_based(question, now=...)`
+4. `classify_intent_rule_based(question, slots)`
+5. 모호한 경우에만 LLM 기반 SQL intent classifier 보조 사용
+6. `resolve_metric`, `resolve_versions`, `resolve_filters`, `resolve_periods`, `resolve_period_groups`
+7. `infer_default_period(...)`로 기간 미지정 질문 보정
+8. `resolve_period_slots(...)`로 실제 적용 기간 계산
+9. `canonicalize_plan(...)`로 builder 입력을 공통 plan으로 정리
+10. `build_sql_from_plan(...)`로 common plan 기반 SQL 조립
+11. `build_execution_plan(...)`로 primary/aux 조회 계획 생성
+12. 실행 결과를 `render_answer_rule_based()` 또는 `render_answer_with_llm()`로 응답화
 
 ## `/sql` 해석 규칙
 
 ### Metric
 - `판매`, `판매량`, `매출`, `실적` -> `sales`
+- `sales`, `qty`, `quantity`, `출하` -> `sales`
 - `순생산`, `생산` -> `net_prod`
+- `production`, `production qty`, `생산량` -> `net_prod`
 - `순입고`, `입고` -> `net_ipgo`
 
 ### Period
 - `2월` 같은 월 단독 표현은 현재 시점 기준으로 연도를 보정합니다.
 - `올해`, `작년`, `이번달`, `지난달`, `이번 분기`, `전분기`, `최근 N개월`을 해석합니다.
+- `2월~4월`, `2월 3월 4월`, `최근3개월` 같은 붙여쓰기/범위 표현도 정규화 후 해석합니다.
 - 답변 기준에는 질문 표현이 아니라 실제 해석된 기간이 노출됩니다.
   - 예: `기준 기간: 2026년 2월`
   - 예: `해석 기간: 2026년 2월 (질문 표현: 2월)`
@@ -65,7 +70,17 @@
 
 ### Version
 - `VH`, `VL`, `WC` 같은 버전 코드는 version 후보로 인식합니다.
+- `vh`, `V/H`, `vl`, `V/L`, `wc`, `W/C`도 같은 canonical version으로 정규화합니다.
 - 다중 버전이면 비교형 의도로 승격될 수 있습니다.
+
+### Normalization / Synonym
+- 붙여쓰기, 혼합 언어, 구두점 표현은 먼저 NLU용 normalized form으로 정리합니다.
+  - 예: `/sql 2월vh판매몇개야` -> `2 월 vh 판매`
+  - 예: `/sql vh/vl 비교` -> `vh 비교 vl 비교`
+  - 예: `/sql vh sales trend` -> `vh 판매 추이`
+- 조사와 군더더기 표현은 slot 해석 전에 제거합니다.
+  - 예: `알려줘`, `보여줘`, `몇개야`, `부탁해`
+- 목표는 질문별 예외처리가 아니라, 서로 다른 표현을 동일 canonical plan으로 수렴시키는 것입니다.
 
 ## `sql_registry.yaml` 작성 규칙
 신규 확장은 질문별 `queries` 추가가 아니라 아래 메타데이터 + common plan 조합을 우선 사용합니다.
@@ -86,6 +101,7 @@ planner 내부 공통 plan은 아래 축으로 정리됩니다.
 - `group_by`
 - `analysis_type`
 - `versions`
+- `compare_target(optional)`
 
 현재 `analysis_type`은 아래 공통 패턴을 사용합니다.
 - `total`
@@ -160,18 +176,24 @@ dimensions:
 - 단일 기간 합계
   - `/sql 2월 vh 판매 알려줘`
   - `/sql 올해 dram 순생산 알려줘`
+  - `/sql 2월vh판매몇개야`
 - 기간 범위 합계
   - `/sql 올해 vh 판매량`
 - 버전 비교
   - `/sql 2월 vh, vl 순생산 비교해줘`
+  - `/sql vh,vl 비교`
+  - `/sql vh/vl 비교`
 - 기간 추이
   - `/sql 2월 3월 4월 vh 트렌드 분석해줘`
+  - `/sql vh sales trend`
 - 기간 그룹 비교
   - `/sql vh 25년 대비 26년 순입고 비교 분석해줘`
 - 차원 그룹화
   - `/sql vh 기준 fam1별 순생산 보여줘`
+  - `/sql fam1별 vh 생산 보여줘`
 
-위 질문들은 모두 별도 query를 새로 추가하지 않고 `sources + metrics + dimensions + query_families + common plan builder` 조합으로 처리하는 것이 기본입니다.
+위 질문들은 모두 별도 query를 새로 추가하지 않고 `normalize + synonym canonicalization + common plan + metadata builder` 조합으로 처리하는 것이 기본입니다.
+표현이 조금 달라도 같은 의미면 동일 canonical plan으로 정규화되도록 유지하는 것이 현재 `/sql` 자동화 2차 개선의 핵심입니다.
 
 ## SQL 답변 정책
 `app/sql_answering.py`는 결과를 3개 섹션으로 만듭니다.

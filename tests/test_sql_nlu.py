@@ -330,6 +330,34 @@ class SqlNluTest(unittest.TestCase):
             for k, vals in filters.items():
                 self.assertEqual(vals, (planner.get("filters") or {}).get(k), msg=question)
 
+    def test_noisy_expression_normalization_cases(self):
+        cases = [
+            ("vh판매추이", "trend", ["VH"], {}, ""),
+            ("2월vh판매몇개야", "total", ["VH"], {}, ""),
+            ("vh vl 비교", "compare", ["VH", "VL"], {}, "version"),
+            ("vh,vl 비교해줘", "compare", ["VH", "VL"], {}, "version"),
+            ("vh/vl 비교", "compare", ["VH", "VL"], {}, "version"),
+            ("올해 dram 순생산", "total", [], {"fam1": ["DRAM"]}, ""),
+            ("fam1별 vh 생산 보여줘", "grouped", ["VH"], {}, "fam1"),
+            ("2월 3월 4월 vh 판매 트렌드", "trend", ["VH"], {}, ""),
+            ("vh sales trend", "trend", ["VH"], {}, ""),
+            ("버전별 판매 비교", "grouped", [], {}, "version"),
+        ]
+        for question, analysis_type, versions, filters, group_by in cases:
+            tr = self._analyze(question)
+            planner = tr.get("planner_plan") or {}
+            self.assertEqual(analysis_type, planner.get("analysis_type"), msg=question)
+            self.assertEqual(versions, planner.get("versions") or [], msg=question)
+            self.assertEqual(group_by, planner.get("group_by") or "", msg=question)
+            for k, vals in filters.items():
+                self.assertEqual(vals, (planner.get("filters") or {}).get(k), msg=question)
+
+    def test_normalized_question_keeps_noisy_inputs_stable(self):
+        tr = self._analyze("2월vh판매몇개야")
+        self.assertIn("2 월 vh 판매", tr.get("normalized_question") or "")
+        tr2 = self._analyze("vh/vl 비교")
+        self.assertIn("비교", tr2.get("normalized_question") or "")
+
     def test_dimension_value_filter_app_total(self):
         tr = self._analyze("APP MOBILE 판매 알려줘")
         self.assertEqual("sales_total", tr.get("final_intent"))

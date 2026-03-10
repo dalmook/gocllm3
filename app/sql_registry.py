@@ -139,6 +139,69 @@ _ANALYSIS_TYPE_TO_DYNAMIC_QUERY_ID = {
     "grouped": "grouped",
 }
 
+_COMMON_VERSION_VALUE_ALIASES = {
+    "vh": "VH",
+    "v/h": "VH",
+    "vl": "VL",
+    "v/l": "VL",
+    "wc": "WC",
+    "w/c": "WC",
+}
+
+_COMMON_METRIC_ALIASES = {
+    "sales": "sales",
+    "qty": "sales",
+    "quantity": "sales",
+    "출하": "sales",
+    "production": "net_prod",
+    "production qty": "net_prod",
+    "생산량": "net_prod",
+    "net production": "net_prod",
+    "ipgo": "net_ipgo",
+}
+
+_COMMON_DIMENSION_ALIASES = {
+    "model": "version",
+    "모델": "version",
+    "모델별": "version",
+    "version": "version",
+    "버전": "version",
+    "버전별": "version",
+    "월별": "yearmonth",
+    "분기별": "quarter",
+    "app별": "app",
+    "그룹별": "",
+}
+
+_COMMON_ANALYSIS_ALIASES = {
+    "trend": ["추이", "트렌드", "흐름", "trend", "flow"],
+    "compare": ["비교", "대비", "vs", "versus", "compare"],
+    "grouped": ["별", "별로", "기준", "그룹별"],
+}
+
+_NORMALIZATION_REPLACEMENTS = {
+    "sales trend": "판매 추이",
+    "sales compare": "판매 비교",
+    "sales": "판매",
+    "qty": "판매",
+    "quantity": "판매",
+    "trend": "추이",
+    "flow": "흐름",
+    "compare": "비교",
+    "versus": "비교",
+    "vs": "비교",
+    "model": "버전",
+    "group by": "그룹별",
+    "groupby": "그룹별",
+    "production qty": "생산량",
+    "production": "생산",
+    "ipgo": "입고",
+}
+
+_FILLER_WORDS = [
+    "알려줘", "알려줄래", "보여줘", "보여줄래", "말해줘", "부탁해", "해줘", "해주세요", "좀", "한번",
+]
+
 
 _STOPWORDS = {
     "판매", "판매량", "매출", "실적", "합계", "조회", "알려줘", "알려", "몇개", "몇", "수량", "월", "년월",
@@ -172,6 +235,8 @@ _DIMENSION_WORDS = {
     "quarter": ["분기별", "분기 별"],
     "fam1": ["fam1별", "fam1 별", "family1별", "패밀리1별"],
 }
+
+_GROUP_BY_HINTS = ["별", "별로", "기준", "그룹별"]
 
 _PERIOD_RELATIVE_WORDS = {
     "this_year": ["올해", "금년"],
@@ -209,10 +274,34 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
+def _normalize_version_token(token: str) -> str:
+    raw = str(token or "").strip().lower()
+    if not raw:
+        return ""
+    compact = re.sub(r"[^a-z0-9]", "", raw)
+    for alias, canonical in _COMMON_VERSION_VALUE_ALIASES.items():
+        alias_compact = re.sub(r"[^a-z0-9]", "", alias.lower())
+        if compact == alias_compact:
+            return canonical
+    return raw.upper()
+
+
 def normalize_question(text: str) -> str:
     q = (text or "").strip().lower()
+    q = re.sub(r"\bv\s*[/\-]?\s*h\b", " vh ", q, flags=re.IGNORECASE)
+    q = re.sub(r"\bv\s*[/\-]?\s*l\b", " vl ", q, flags=re.IGNORECASE)
+    q = re.sub(r"\bw\s*[/\-]?\s*c\b", " wc ", q, flags=re.IGNORECASE)
+    q = re.sub(r"\b(vh|vl|wc)\s*[,/]\s*(vh|vl|wc)\b", r"\1 비교 \2", q, flags=re.IGNORECASE)
+    q = re.sub(r"[,/(){}\[\]|]+", " ", q)
     q = re.sub(r"([a-z0-9])([가-힣])", r"\1 \2", q)
     q = re.sub(r"([가-힣])([a-z0-9])", r"\1 \2", q)
+    q = re.sub(r"([0-9])([a-z])", r"\1 \2", q)
+    q = re.sub(r"([a-z])([0-9])", r"\1 \2", q)
+    q = re.sub(r"\bfam\s+(\d+)\b", r"fam\1", q)
+    for src, dst in sorted(_NORMALIZATION_REPLACEMENTS.items(), key=lambda x: len(x[0]), reverse=True):
+        q = re.sub(rf"(?<![a-z0-9가-힣]){re.escape(src)}(?![a-z0-9가-힣])", f" {dst} ", q, flags=re.IGNORECASE)
+    for filler in _FILLER_WORDS:
+        q = q.replace(filler, " ")
     q = re.sub(r"\s+", " ", q).strip()
     return q
 
@@ -354,6 +443,8 @@ def _parse_semantic_sections(data: Dict[str, Any]) -> None:
             alias_map[metric_id.lower()] = metric_id
             for alias in aliases:
                 alias_map[alias] = metric_id
+    for alias, metric_id in _COMMON_METRIC_ALIASES.items():
+        alias_map[str(alias).lower()] = str(metric_id)
 
     if isinstance(dimensions_raw, dict):
         for did, spec in dimensions_raw.items():
@@ -385,6 +476,9 @@ def _parse_semantic_sections(data: Dict[str, Any]) -> None:
             dim_alias_map[dim_id.lower()] = dim_id
             for alias in aliases:
                 dim_alias_map[alias] = dim_id
+    for alias, dim_id in _COMMON_DIMENSION_ALIASES.items():
+        if dim_id:
+            dim_alias_map[str(alias).lower()] = str(dim_id)
 
     if isinstance(families_raw, dict):
         for fid, spec in families_raw.items():
@@ -583,10 +677,16 @@ def _extract_periods(question: str, norm: str, now: Optional[datetime] = None) -
 def _extract_dimension(norm: str) -> str:
     q = norm.lower()
     compact = q.replace(" ", "")
-    group_signal = any(tok in compact for tok in ("별", "기준"))
+    group_signal = any(tok in compact for tok in _GROUP_BY_HINTS)
     for alias, dim_id in _SQL_DIMENSION_ALIAS_MAP.items():
         if not alias:
             continue
+        dim_spec = _SQL_DIMENSIONS.get(dim_id)
+        if dim_spec is not None:
+            alias_lower = alias.lower()
+            sample_lowers = {str(x).lower() for x in (dim_spec.sample_values or [])}
+            if alias_lower in dim_spec.value_aliases or alias_lower in sample_lowers:
+                continue
         if alias in {"버전", "version", "월", "년월", "month"}:
             if group_signal and alias.replace(" ", "") in compact:
                 return dim_id
@@ -609,7 +709,7 @@ def _extract_compare(norm: str) -> str:
     for key, words in _COMPARE_WORDS.items():
         if any(w.replace(" ", "") in compact for w in words):
             return key
-    if any(x in compact for x in ("비교", "차이", "대비", "vs", "versus")):
+    if any(x in compact for x in [w.replace(" ", "") for w in _COMMON_ANALYSIS_ALIASES["compare"]] + ["차이"]):
         return "compare_versions"
     if "와" in compact or "과" in compact:
         return "compare_versions"
@@ -617,22 +717,25 @@ def _extract_compare(norm: str) -> str:
 
 
 def _extract_versions(question: str, norm: str) -> List[str]:
-    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{0,12}", question or "")
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_/\-]{0,12}", (question or "") + " " + (norm or ""))
     stop = {
         "SQL", "VERSION", "SALES", "SUM", "AVG", "MAX", "MIN", "COUNT",
         "MONTH", "YEAR", "QUARTER", "THIS", "LAST", "RECENT", "VS", "AND",
-        "NET", "PRODUCTION", "IPGO", "COMPARE", "ANALYSIS",
+        "NET", "PRODUCTION", "IPGO", "COMPARE", "ANALYSIS", "TREND", "FLOW",
+        "FAM", "APP",
     }
 
     versions: List[str] = []
     for tok in tokens:
-        up = tok.upper()
+        up = _normalize_version_token(tok)
         low = tok.lower()
         if up in stop:
             continue
         if low in _SQL_DIMENSION_ALIAS_MAP or low in _SQL_METRIC_ALIAS_MAP:
             continue
         if re.fullmatch(r"fam\d+", low):
+            continue
+        if low in {"fam", "app"}:
             continue
         if re.fullmatch(r"20\d{2}", up):
             continue
@@ -660,8 +763,10 @@ def resolve_metric(question: str, slots: Dict[str, Any]) -> str:
 
 def resolve_versions(question: str, slots: Dict[str, Any]) -> List[str]:
     versions = [str(x).strip().upper() for x in ((slots or {}).get("versions") or []) if str(x).strip()]
-    if not versions:
-        versions = _extract_versions(question, normalize_question(question))
+    extracted_versions = _extract_versions(question, normalize_question(question))
+    for v in extracted_versions:
+        if v not in versions:
+            versions.append(v)
     single = str((slots or {}).get("version") or "").strip().upper()
     if single and single not in versions:
         versions.append(single)
@@ -733,7 +838,7 @@ def _extract_dimension_filters(norm: str) -> Dict[str, List[str]]:
     for dim_id, dim in _SQL_DIMENSIONS.items():
         if not dim.supports_filter:
             continue
-        if dim_id == "yearmonth":
+        if dim_id in {"yearmonth", "version"}:
             continue
         aliases = sorted(set([dim_id] + list(dim.aliases or [])), key=len, reverse=True)
         for alias in aliases:
@@ -934,6 +1039,77 @@ def infer_query_family(question: str, slots: Dict[str, Any]) -> str:
     return "total"
 
 
+def canonicalize_plan(question: str, slots: Dict[str, Any], *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    metric = resolve_metric(question, slots) or "sales"
+    dimension = resolve_dimension(str(slots.get("dimension") or ""), question, slots)
+    source = resolve_source(str((slots or {}).get("source") or ""), metric, dimension)
+    versions = resolve_versions(question, slots)
+    periods = resolve_periods(question, slots, now=now)
+    period_groups = resolve_period_groups(question, slots, now=now)
+    filters = resolve_filters(question, slots)
+
+    filter_values_upper = {
+        str(v).strip().upper()
+        for vals in filters.values()
+        for v in (vals if isinstance(vals, list) else [vals])
+        if str(v).strip()
+    }
+    if filter_values_upper:
+        versions = [v for v in versions if str(v).strip().upper() not in filter_values_upper]
+    if not versions and filters.get("version"):
+        versions = [str(v).upper() for v in filters.get("version") or [] if str(v).strip()]
+    if versions and "version" in filters:
+        del filters["version"]
+
+    norm = normalize_question(question)
+    compact = norm.replace(" ", "")
+    compare = bool((slots or {}).get("compare")) or _extract_compare(norm) != "" or len(versions) >= 2
+    trend = bool((slots or {}).get("trend")) or any(w in compact for w in [x.replace(" ", "") for x in _COMMON_ANALYSIS_ALIASES["trend"]])
+    grouped_hint = bool((slots or {}).get("group_requested")) or any(tok in compact for tok in _GROUP_BY_HINTS)
+    analysis = bool((slots or {}).get("analysis"))
+
+    compare_target = ""
+    group_by = ""
+    if compare and period_groups:
+        analysis_type = "compare"
+        compare_target = "period_groups"
+    elif compare and len(versions) >= 2:
+        analysis_type = "compare"
+        compare_target = "versions"
+        group_by = "version"
+    elif trend:
+        analysis_type = "trend"
+    elif dimension in {"fam1", "app"} and not filters.get(dimension) and not versions:
+        analysis_type = "grouped"
+        group_by = dimension
+    elif dimension and grouped_hint:
+        analysis_type = "grouped"
+        group_by = dimension
+    else:
+        analysis_type = "total"
+
+    family = _normalize_query_family_id("", analysis_type=analysis_type, compare_period_groups=(compare_target == "period_groups"))
+    return {
+        "source": source,
+        "metric": metric,
+        "periods": periods,
+        "period_groups": period_groups,
+        "filters": filters,
+        "group_by": group_by,
+        "dimension": dimension,
+        "analysis_type": analysis_type,
+        "versions": versions,
+        "compare_target": compare_target,
+        "compare": compare,
+        "trend": trend,
+        "analysis": analysis,
+        "family": family,
+        "raw_question": question,
+        "normalized_question": norm,
+        "intent_hint": str((slots or {}).get("intent_hint") or ""),
+    }
+
+
 def build_latest_snapshot_filter(source: SQLSourceSpec) -> str:
     period_column = _safe_identifier(source.period_column)
     snapshot_column = _safe_identifier(source.snapshot_column)
@@ -1083,55 +1259,8 @@ ORDER BY VALUE DESC
 
 
 def build_execution_plan_from_slots(question: str, slots: Dict[str, Any], *, now: Optional[datetime] = None) -> Dict[str, Any]:
-    metric = resolve_metric(question, slots) or "sales"
-    dimension = resolve_dimension(str(slots.get("dimension") or ""), question, slots)
-    source = resolve_source(str((slots or {}).get("source") or ""), metric, dimension)
-    versions = resolve_versions(question, slots)
-    periods = resolve_periods(question, slots, now=now)
-    period_groups = resolve_period_groups(question, slots, now=now)
-    # 1st-pass automation keeps planning narrow: compose a small common plan from metadata.
-    analysis_type = infer_query_family(question, slots)
-    filters = resolve_filters(question, slots)
-    filter_values_upper = {
-        str(v).strip().upper()
-        for vals in filters.values()
-        for v in (vals if isinstance(vals, list) else [vals])
-        if str(v).strip()
-    }
-    if filter_values_upper:
-        versions = [v for v in versions if str(v).strip().upper() not in filter_values_upper]
-    if not versions and filters.get("version"):
-        versions = [str(v).upper() for v in filters.get("version") or [] if str(v).strip()]
-    if versions and "version" in filters:
-        del filters["version"]
-    compare = bool((slots or {}).get("compare")) or analysis_type == "compare"
-    trend = bool((slots or {}).get("trend")) or analysis_type == "trend"
-    analysis = bool((slots or {}).get("analysis"))
-    compare_period_groups = bool(period_groups) and analysis_type == "compare"
-    family = _normalize_query_family_id("", analysis_type=analysis_type, compare_period_groups=compare_period_groups)
-    group_by = ""
-    if analysis_type == "compare" and len(versions) >= 2 and not compare_period_groups:
-        group_by = "version"
-    elif analysis_type == "grouped":
-        group_by = dimension
-    return {
-        "source": source,
-        "metric": metric,
-        "analysis_type": analysis_type,
-        "family": family,
-        "versions": versions,
-        "periods": periods,
-        "period_groups": period_groups,
-        "dimension": dimension,
-        "group_by": group_by,
-        "filters": filters,
-        "compare": compare,
-        "trend": trend,
-        "analysis": analysis,
-        "raw_question": question,
-        "normalized_question": normalize_question(question),
-        "intent_hint": str((slots or {}).get("intent_hint") or ""),
-    }
+    # 2nd-pass automation canonicalizes noisy expressions into a stable builder plan.
+    return canonicalize_plan(question, slots, now=now)
 
 
 def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Optional[SQLRegistryMatch]:
@@ -1421,16 +1550,16 @@ def _extract_version(question: str, norm: str) -> str:
     # explicit key-value first
     m_kv = re.search(r"(?:version|버전)\s*[:=]\s*([A-Za-z0-9_\-]{1,16})", question, flags=re.IGNORECASE)
     if m_kv:
-        return m_kv.group(1).strip().upper()
+        return _normalize_version_token(m_kv.group(1))
 
     m_after = re.search(r"(?:version|버전)\s*([A-Za-z0-9_\-]{1,16})", question, flags=re.IGNORECASE)
     if m_after:
-        return m_after.group(1).strip().upper()
+        return _normalize_version_token(m_after.group(1))
 
     tokens = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{1,12}", question)
     stop = {
         "SQL", "VERSION", "SALES", "SUM", "AVG", "MAX", "MIN", "COUNT",
-        "MONTH", "YEAR", "QUARTER", "THIS", "LAST", "RECENT",
+        "MONTH", "YEAR", "QUARTER", "THIS", "LAST", "RECENT", "TREND", "FLOW",
     }
     for tok in tokens:
         up = tok.upper()
@@ -1443,7 +1572,7 @@ def _extract_version(question: str, norm: str) -> str:
             continue
         if re.fullmatch(r"20\d{2}", up):
             continue
-        return up
+        return _normalize_version_token(up)
 
     if " vh " in f" {norm} ":
         return "VH"
@@ -1452,6 +1581,7 @@ def _extract_version(question: str, norm: str) -> str:
 
 def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -> Dict[str, Any]:
     norm = normalize_question(question)
+    compact = norm.replace(" ", "")
 
     metric = _extract_metric(norm)
     aggregation = _extract_aggregation(norm) or ("sum" if metric else "")
@@ -1459,11 +1589,12 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
     periods = _extract_periods(question, norm, now=now)
     dimension = _extract_dimension(norm)
     compare = _extract_compare(norm)
-    trend = any(w in norm for w in _TREND_WORDS)
+    trend = any(w.replace(" ", "") in compact for w in [*_TREND_WORDS, *_COMMON_ANALYSIS_ALIASES["trend"]])
     version = _extract_version(question, norm)
     versions = _extract_versions(question, norm)
     analysis = any(x in norm for x in ("분석", "해석", "비교 분석", "비교분석"))
     filters = _extract_dimension_filters(norm)
+    group_requested = any(x in compact for x in _GROUP_BY_HINTS)
 
     if trend and not dimension:
         dimension = "yearmonth"
@@ -1500,6 +1631,7 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
         "compare_flag": bool(compare),
         "analysis": analysis,
         "trend": trend,
+        "group_requested": group_requested,
         "filters": filters,
     }
     return slots
