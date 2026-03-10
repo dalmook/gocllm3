@@ -269,6 +269,25 @@ dimensions:
   - `주간 보고/주간보고/보고서` 표현도 weekly rerank 규칙 대상에 포함
 - 위 규칙 외 문서성 질문은 기존 `rag_only`/`hybrid` fallback 유지
 
+## RAG 조회 정책
+- RAG HTTP timeout은 `requests` tuple timeout 기준으로 `connect=5초`, `read=60초`를 사용합니다.
+- 1차 조회는 기존 query/index/top_k 설정을 그대로 사용합니다.
+- `requests.exceptions.ReadTimeout` 발생 시 즉시 실패시키지 않고 warning 로그를 남긴 뒤 fallback 재조회합니다.
+- 2차 fallback은 우선순위가 가장 높은 단일 index만 대상으로 재조회합니다.
+- fallback 시 `top_k`는 절반 수준으로 축소합니다. 최소값은 `1`입니다.
+- 1차에서 timeout이 일부 index에서만 발생해도 fallback은 수행합니다.
+- fallback도 결과가 없지만 1차에서 일부 문서를 이미 받았다면, 완전 실패 대신 1차 partial result를 유지합니다.
+
+## RAG 사용자 안내 / 메타데이터
+- RAG 병렬 조회 결과는 문서 목록과 별도로 timeout/fallback/user notice 메타데이터를 함께 수집합니다.
+- timeout fallback이 실제로 발생하면 최종 사용자 응답 앞에 아래 안내를 붙일 수 있습니다.
+  - `문서 검색 응답이 지연되어 범위를 줄여 재조회했습니다.`
+- query log의 `debug_json`에는 아래 항목이 기록됩니다.
+  - `rag_timeout_occurred`
+  - `rag_fallback_used`
+  - `rag_user_notice`
+  - `rag_query_meta`
+
 ## 운영 환경변수
 
 ### 서버 / Knox
@@ -301,6 +320,11 @@ dimensions:
 ## 주요 로그 Prefix
 - `[LLM]`
 - `[MEMORY]`
+- `[RAG]`
+- `[RAG Search]`
+- `[RAG Retrieve INFO]`
+- `[RAG Retrieve WARN]`
+- `[RAG Retrieve ERROR]`
 - `[SQL_NLU]`
 - `[SQL_PLAN]`
 - `[SQL_EXEC]`
@@ -321,7 +345,7 @@ uvicorn gocllm3:app --host 0.0.0.0 --port 9500
 대표 SQL NLU/렌더링 검증:
 
 ```bash
-python -m unittest /workspaces/gocllm3/tests/test_sql_nlu.py
+pytest -q /workspaces/gocllm3/tests
 ```
 
 이 테스트는 현재 다음 내용을 검증합니다.
@@ -330,6 +354,7 @@ python -m unittest /workspaces/gocllm3/tests/test_sql_nlu.py
 - direct dimension value 추론
 - quarter column 사용
 - 답변 렌더링 문구와 기준 섹션
+- RAG timeout fallback과 병렬 조회 메타데이터 집계
 
 ## 문서 업데이트 규칙
 코드 수정 시 `README.md`도 함께 업데이트합니다. 특히 아래 변경은 반드시 반영합니다.
@@ -337,5 +362,6 @@ python -m unittest /workspaces/gocllm3/tests/test_sql_nlu.py
 1. `/sql` 해석 규칙 변경
 2. `sql_registry.yaml` 스키마 변경
 3. 답변 렌더링 방식 변경
-4. 신규 env var 추가
-5. 실행/테스트 명령 변경
+4. RAG timeout / fallback / 로그 정책 변경
+5. 신규 env var 추가
+6. 실행/테스트 명령 변경
