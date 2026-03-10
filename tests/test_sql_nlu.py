@@ -115,6 +115,7 @@ class SqlNluTest(unittest.TestCase):
         self.assertGreaterEqual(len(plan), 2)
         self.assertEqual("primary", plan[0].role)
         self.assertEqual("aux", plan[1].role)
+        self.assertEqual("total", plan[0].query_id)
 
     def test_missing_slot_fallback(self):
         tr = self._analyze("판매량")
@@ -247,6 +248,7 @@ class SqlNluTest(unittest.TestCase):
     def test_trend_periods_slots_and_params(self):
         tr = self._analyze("2월 3월 4월 vh 트렌드 분석해줘")
         self.assertEqual("metric_trend_by_period", tr.get("final_intent"))
+        self.assertEqual("trend", tr.get("selected_query_id"))
         slots = tr.get("final_slots") or {}
         self.assertEqual(["202602", "202603", "202604"], slots.get("periods"))
         self.assertEqual(["VH"], slots.get("versions"))
@@ -284,10 +286,11 @@ class SqlNluTest(unittest.TestCase):
     def test_grouped_by_dimension_slots_and_params(self):
         tr = self._analyze("vh 기준 fam1별 순생산 보여줘")
         self.assertEqual("metric_grouped_dimension", tr.get("final_intent"))
-        self.assertEqual("grouped_by_dimension", tr.get("selected_query_id"))
+        self.assertEqual("grouped", tr.get("selected_query_id"))
         slots = tr.get("final_slots") or {}
         self.assertEqual("net_prod", slots.get("metric"))
         self.assertEqual("fam1", slots.get("dimension"))
+        self.assertEqual("fam1", slots.get("group_by"))
         self.assertEqual(["VH"], slots.get("versions"))
 
         m = tr.get("match")
@@ -299,7 +302,7 @@ class SqlNluTest(unittest.TestCase):
     def test_dimension_value_filter_fam1_total(self):
         tr = self._analyze("FAM1 DRAM 순생산 알려줘")
         self.assertEqual("sales_total", tr.get("final_intent"))
-        self.assertIn(tr.get("selected_query_id"), {"total_single_period", "total_period_range"})
+        self.assertEqual("total", tr.get("selected_query_id"))
         slots = tr.get("final_slots") or {}
         self.assertEqual("net_prod", slots.get("metric"))
         self.assertEqual(["DRAM"], (slots.get("filters") or {}).get("fam1"))
@@ -309,6 +312,23 @@ class SqlNluTest(unittest.TestCase):
         params, missing = build_sql_params_with_missing(m, "FAM1 DRAM 순생산 알려줘")
         self.assertEqual([], missing)
         self.assertEqual("DRAM", params.get("fam1_1"))
+
+    def test_common_plan_shape_for_core_queries(self):
+        cases = [
+            ("2월 vh 판매 알려줘", "total", "", ["VH"], {}),
+            ("올해 dram 순생산 알려줘", "total", "", [], {"fam1": ["DRAM"]}),
+            ("2월 vh, vl 순생산 비교해줘", "compare", "version", ["VH", "VL"], {}),
+            ("2월 3월 4월 vh 트렌드 분석해줘", "trend", "", ["VH"], {}),
+            ("vh 기준 fam1별 순생산 보여줘", "grouped", "fam1", ["VH"], {}),
+        ]
+        for question, analysis_type, group_by, versions, filters in cases:
+            tr = self._analyze(question)
+            planner = tr.get("planner_plan") or {}
+            self.assertEqual(analysis_type, planner.get("analysis_type"), msg=question)
+            self.assertEqual(group_by, planner.get("group_by") or "", msg=question)
+            self.assertEqual(versions, planner.get("versions") or [], msg=question)
+            for k, vals in filters.items():
+                self.assertEqual(vals, (planner.get("filters") or {}).get(k), msg=question)
 
     def test_dimension_value_filter_app_total(self):
         tr = self._analyze("APP MOBILE 판매 알려줘")

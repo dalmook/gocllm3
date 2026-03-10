@@ -100,24 +100,21 @@ dimensions:
     description: "APP 축"
 
 query_families:
-  total_single_period:
+  total:
     source: psi_simul
-    description: "단일 기간 합계"
-  total_period_range:
+    description: "공통 total plan: 단일 기간/기간 범위 합계"
+  trend:
     source: psi_simul
-    description: "기간 범위 합계"
-  compare_versions_same_period:
+    description: "공통 trend plan: 기간 추이"
+  compare:
     source: psi_simul
-    description: "같은 기간 버전 비교"
-  trend_by_period:
+    description: "공통 compare plan: 같은 기간 버전 비교"
+  compare_groups:
     source: psi_simul
-    description: "여러 기간 추이"
-  grouped_by_dimension:
+    description: "공통 compare plan: 기간 그룹 비교"
+  grouped:
     source: psi_simul
-    description: "지정 차원 그룹 합계"
-  compare_period_groups:
-    source: psi_simul
-    description: "기간 그룹 비교"
+    description: "공통 grouped plan: 차원 group by"
 
 # Legacy compatibility only:
 # 아래 queries는 metadata-driven planner/builder가 처리하지 못한 구문의 fallback 용도로만 유지한다.

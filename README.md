@@ -40,7 +40,7 @@
 5. `resolve_metric`, `resolve_versions`, `resolve_filters`, `resolve_periods`, `resolve_period_groups`
 6. `infer_default_period(...)`로 기간 미지정 질문 보정
 7. `resolve_period_slots(...)`로 실제 적용 기간 계산
-8. `build_sql_from_plan(...)`로 source/metric/dimension metadata 기반 SQL 조립
+8. `build_sql_from_plan(...)`로 common plan 기반 SQL 조립
 9. `build_execution_plan(...)`로 primary/aux 조회 계획 생성
 10. 실행 결과를 `render_answer_rule_based()` 또는 `render_answer_with_llm()`로 응답화
 
@@ -68,14 +68,32 @@
 - 다중 버전이면 비교형 의도로 승격될 수 있습니다.
 
 ## `sql_registry.yaml` 작성 규칙
-신규 확장은 `queries`보다 아래 메타데이터를 우선 사용합니다.
+신규 확장은 질문별 `queries` 추가가 아니라 아래 메타데이터 + common plan 조합을 우선 사용합니다.
 
 - `sources`: 테이블, 기준 컬럼, snapshot 컬럼, 기본 필터
 - `metrics`: 집계 대상 컬럼
 - `dimensions`: 필터/그룹 차원
-- `query_families`: planner가 조합하는 질의 형태
+- `query_families`: planner가 사용하는 공통 분석 패턴
 
-`queries` 섹션은 legacy fallback 용도로만 유지합니다.
+`queries` 섹션은 legacy fallback 용도로만 유지합니다. 새 질문을 처리하기 위해 query를 질문별로 계속 추가하는 방식은 지양합니다.
+
+### Common plan 구조
+planner 내부 공통 plan은 아래 축으로 정리됩니다.
+
+- `metric`
+- `periods`
+- `filters`
+- `group_by`
+- `analysis_type`
+- `versions`
+
+현재 `analysis_type`은 아래 공통 패턴을 사용합니다.
+- `total`
+- `trend`
+- `compare`
+- `grouped`
+
+기간 그룹 비교는 `analysis_type=compare`에 `period_groups`가 같이 있는 형태로 처리되고, 내부 동적 query id는 `compare_groups`를 사용합니다.
 
 ### Source 예시
 ```yaml
@@ -96,6 +114,26 @@ sources:
 - `period_column`: 월/연 범위 기본 컬럼
 - `quarter_column`: 분기 질의 전용 컬럼
 - 분기 질의일 때만 planner가 `QUARTER` 컬럼과 `anchor_quarter/start_quarter/end_quarter` 바인딩을 사용합니다.
+
+### Query Family 예시
+```yaml
+query_families:
+  total:
+    source: psi_simul
+    description: "공통 total plan"
+  trend:
+    source: psi_simul
+    description: "공통 trend plan"
+  compare:
+    source: psi_simul
+    description: "공통 compare plan"
+  compare_groups:
+    source: psi_simul
+    description: "공통 compare plan for period groups"
+  grouped:
+    source: psi_simul
+    description: "공통 grouped plan"
+```
 
 ### Dimension 예시
 ```yaml
@@ -132,6 +170,8 @@ dimensions:
   - `/sql vh 25년 대비 26년 순입고 비교 분석해줘`
 - 차원 그룹화
   - `/sql vh 기준 fam1별 순생산 보여줘`
+
+위 질문들은 모두 별도 query를 새로 추가하지 않고 `sources + metrics + dimensions + query_families + common plan builder` 조합으로 처리하는 것이 기본입니다.
 
 ## SQL 답변 정책
 `app/sql_answering.py`는 결과를 3개 섹션으로 만듭니다.

@@ -122,6 +122,23 @@ _SQL_QUERY_FAMILIES: Dict[str, SQLQueryFamilySpec] = {}
 _SQL_METRIC_ALIAS_MAP: Dict[str, str] = {}
 _SQL_DIMENSION_ALIAS_MAP: Dict[str, str] = {}
 
+_LEGACY_FAMILY_TO_ANALYSIS_TYPE = {
+    "total_single_period": "total",
+    "total_period_range": "total",
+    "trend_by_period": "trend",
+    "compare_versions_same_period": "compare",
+    "compare_period_groups": "compare",
+    "grouped_by_dimension": "grouped",
+}
+
+_ANALYSIS_TYPE_TO_DYNAMIC_QUERY_ID = {
+    "total": "total",
+    "trend": "trend",
+    "compare": "compare",
+    "compare_groups": "compare_groups",
+    "grouped": "grouped",
+}
+
 
 _STOPWORDS = {
     "판매", "판매량", "매출", "실적", "합계", "조회", "알려줘", "알려", "몇개", "몇", "수량", "월", "년월",
@@ -233,6 +250,25 @@ def _quarter_label_from_yyyymm(yyyymm: str) -> str:
 
 def _quarter_range_labels(start_yyyymm: str, end_yyyymm: str) -> Tuple[str, str]:
     return _quarter_label_from_yyyymm(start_yyyymm), _quarter_label_from_yyyymm(end_yyyymm)
+
+
+def _normalize_query_family_id(family: str, analysis_type: str = "", compare_period_groups: bool = False) -> str:
+    raw = str(family or "").strip()
+    if raw in _SQL_QUERY_FAMILIES:
+        return raw
+    normalized_analysis = str(analysis_type or "").strip().lower()
+    if compare_period_groups and normalized_analysis == "compare":
+        normalized_analysis = "compare_groups"
+    if normalized_analysis in _ANALYSIS_TYPE_TO_DYNAMIC_QUERY_ID:
+        return _ANALYSIS_TYPE_TO_DYNAMIC_QUERY_ID[normalized_analysis]
+    return raw
+
+
+def _analysis_type_from_family(family: str, compare_period_groups: bool = False) -> str:
+    raw = str(family or "").strip()
+    if compare_period_groups and raw in {"compare", "compare_groups", "compare_period_groups"}:
+        return "compare_groups"
+    return _LEGACY_FAMILY_TO_ANALYSIS_TYPE.get(raw, raw)
 
 
 def _parse_semantic_sections(data: Dict[str, Any]) -> None:
@@ -884,18 +920,18 @@ def infer_query_family(question: str, slots: Dict[str, Any]) -> str:
     compact = norm.replace(" ", "")
 
     if period_groups and compare:
-        return "compare_period_groups"
+        return "compare"
     if trend or any(k in norm for k in ("트렌드", "추이", "흐름")):
-        return "trend_by_period"
+        return "trend"
     if dimension and any(k in compact for k in ("별", "기준", "그룹")):
-        return "grouped_by_dimension"
+        return "grouped"
     if dimension and dimension not in filters and dimension in {"fam1", "app"}:
-        return "grouped_by_dimension"
+        return "grouped"
     if compare and len(versions) >= 2:
-        return "compare_versions_same_period"
+        return "compare"
     if len(periods) >= 2:
-        return "total_period_range"
-    return "total_single_period"
+        return "total"
+    return "total"
 
 
 def build_latest_snapshot_filter(source: SQLSourceSpec) -> str:
@@ -1053,7 +1089,8 @@ def build_execution_plan_from_slots(question: str, slots: Dict[str, Any], *, now
     versions = resolve_versions(question, slots)
     periods = resolve_periods(question, slots, now=now)
     period_groups = resolve_period_groups(question, slots, now=now)
-    family = infer_query_family(question, slots)
+    # 1st-pass automation keeps planning narrow: compose a small common plan from metadata.
+    analysis_type = infer_query_family(question, slots)
     filters = resolve_filters(question, slots)
     filter_values_upper = {
         str(v).strip().upper()
@@ -1067,17 +1104,26 @@ def build_execution_plan_from_slots(question: str, slots: Dict[str, Any], *, now
         versions = [str(v).upper() for v in filters.get("version") or [] if str(v).strip()]
     if versions and "version" in filters:
         del filters["version"]
-    compare = bool((slots or {}).get("compare")) or family in {"compare_versions_same_period", "compare_period_groups"}
-    trend = bool((slots or {}).get("trend")) or family == "trend_by_period"
+    compare = bool((slots or {}).get("compare")) or analysis_type == "compare"
+    trend = bool((slots or {}).get("trend")) or analysis_type == "trend"
     analysis = bool((slots or {}).get("analysis"))
+    compare_period_groups = bool(period_groups) and analysis_type == "compare"
+    family = _normalize_query_family_id("", analysis_type=analysis_type, compare_period_groups=compare_period_groups)
+    group_by = ""
+    if analysis_type == "compare" and len(versions) >= 2 and not compare_period_groups:
+        group_by = "version"
+    elif analysis_type == "grouped":
+        group_by = dimension
     return {
         "source": source,
         "metric": metric,
+        "analysis_type": analysis_type,
         "family": family,
         "versions": versions,
         "periods": periods,
         "period_groups": period_groups,
         "dimension": dimension,
+        "group_by": group_by,
         "filters": filters,
         "compare": compare,
         "trend": trend,
@@ -1091,12 +1137,13 @@ def build_execution_plan_from_slots(question: str, slots: Dict[str, Any], *, now
 def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Optional[SQLRegistryMatch]:
     source_id = str(plan.get("source") or "")
     metric_id = str(plan.get("metric") or "")
-    family = str(plan.get("family") or "")
-    dimension_id = str(plan.get("dimension") or "")
+    period_groups = [x for x in (plan.get("period_groups") or []) if isinstance(x, dict)]
+    analysis_type = str(plan.get("analysis_type") or _analysis_type_from_family(str(plan.get("family") or ""), bool(period_groups))).strip().lower()
+    family = _normalize_query_family_id(str(plan.get("family") or ""), analysis_type=analysis_type, compare_period_groups=bool(period_groups))
+    dimension_id = str(plan.get("group_by") or plan.get("dimension") or "")
     intent_hint = str(plan.get("intent_hint") or "")
     versions = [str(x).strip().upper() for x in (plan.get("versions") or []) if str(x).strip()]
     periods = [str(x).strip() for x in (plan.get("periods") or []) if str(x).strip()]
-    period_groups = [x for x in (plan.get("period_groups") or []) if isinstance(x, dict)]
     filters = dict(plan.get("filters") or {})
 
     if family not in _SQL_QUERY_FAMILIES:
@@ -1136,9 +1183,9 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
         versions = [str(v).strip().upper() for v in filters.get("version") or [] if str(v).strip()]
     if "version" in filters:
         del filters["version"]
-    if family in {"compare_versions_same_period", "trend_by_period"} and len(versions) >= 2:
+    if analysis_type == "compare" and not period_groups and len(versions) >= 2:
         dimension_id = "version"
-    if family == "grouped_by_dimension" and not dimension_id:
+    if analysis_type == "grouped" and not dimension_id:
         return None
 
     dim_spec = _SQL_DIMENSIONS.get(dimension_id) if dimension_id else None
@@ -1164,6 +1211,8 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
         "periods": periods,
         "period_groups": period_groups,
         "dimension": dimension_id,
+        "group_by": dimension_id,
+        "analysis_type": analysis_type,
         "family": family,
         "compare": bool(plan.get("compare")),
         "trend": bool(plan.get("trend")),
@@ -1238,7 +1287,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
         f"WHERE ({snapshot_period_filter}){default_filter_sql}{version_filter}{dimension_filter_sql})"
     )
 
-    if family == "compare_versions_same_period":
+    if family == "compare":
         if len(versions) < 2:
             return None
         sql = build_compare_versions_sql(
@@ -1252,8 +1301,8 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
             dimension_filter_sql=dimension_filter_sql,
         )
         intent = "metric_compare_versions"
-        query_id = "compare_versions_same_period"
-    elif family == "trend_by_period":
+        query_id = "compare"
+    elif family == "trend":
         sql = build_trend_sql(
             table=table,
             period_column=active_period_column,
@@ -1266,8 +1315,8 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
             dimension_filter_sql=dimension_filter_sql,
         )
         intent = "metric_trend_by_period"
-        query_id = "trend_by_period"
-    elif family == "grouped_by_dimension":
+        query_id = "trend"
+    elif family == "grouped":
         if dim_spec is None or not dim_spec.supports_groupby:
             return None
         dim_col = resolve_dimension_column(dimension_id, source.id)
@@ -1282,8 +1331,8 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
             dimension_filter_sql=dimension_filter_sql,
         )
         intent = "metric_grouped_dimension"
-        query_id = "grouped_by_dimension"
-    elif family == "compare_period_groups":
+        query_id = "grouped"
+    elif family == "compare_groups":
         if len(period_groups) < 2:
             return None
         case_parts: List[str] = []
@@ -1309,10 +1358,10 @@ WHERE 1=1
 GROUP BY CASE {' '.join(case_parts)} ELSE 'OTHER' END
 HAVING CASE {' '.join(case_parts)} ELSE 'OTHER' END <> 'OTHER'
 ORDER BY PERIOD_GROUP
-""".strip()
+        """.strip()
         intent = "metric_compare_period_groups"
-        query_id = "compare_period_groups"
-    elif family == "total_period_range":
+        query_id = "compare_groups"
+    elif family == "total":
         sql = build_total_sql(
             table=table,
             value_column=value_column,
@@ -1323,19 +1372,9 @@ ORDER BY PERIOD_GROUP
             dimension_filter_sql=dimension_filter_sql,
         )
         intent = intent_hint or "sales_total"
-        query_id = "total_period_range"
+        query_id = "total"
     else:
-        sql = build_total_sql(
-            table=table,
-            value_column=value_column,
-            latest_snapshot_filter=latest_snapshot_filter,
-            default_filter_sql=default_filter_sql,
-            period_filter=period_filter,
-            version_filter=version_filter,
-            dimension_filter_sql=dimension_filter_sql,
-        )
-        intent = intent_hint or "sales_total"
-        query_id = "total_single_period"
+        return None
 
     item = SQLRegistryItem(
         id=query_id,
@@ -1348,8 +1387,8 @@ ORDER BY PERIOD_GROUP
         intent=intent,
         supported_slots=["metric", "versions", "periods", "period_groups", "dimension", "analysis", "compare", "trend"],
         default_aggregation="sum",
-        supports_compare=family == "compare_versions_same_period",
-        supports_trend=family == "trend_by_period",
+        supports_compare=family == "compare",
+        supports_trend=family == "trend",
         groupable_dimensions=list(_SQL_DIMENSIONS.keys()),
         deprecated=False,
     )
@@ -1653,17 +1692,17 @@ def _safe_identifier(name: str) -> str:
 
 def select_query_family(intent: str, slots: Dict[str, Any], metric: str) -> str:
     if intent == "metric_compare_versions" and len(slots.get("versions") or []) >= 2:
-        return "compare_versions_same_period"
+        return "compare"
     if intent == "metric_compare_period_groups":
-        return "compare_period_groups"
+        return "compare"
     if intent == "metric_grouped_dimension":
-        return "grouped_by_dimension"
+        return "grouped"
     if intent in ("sales_trend", "metric_trend_by_period"):
-        return "trend_by_period"
+        return "trend"
     if len(slots.get("periods") or []) >= 2:
-        return "total_period_range"
+        return "total"
     if intent in ("sales_total", "sales_grouped"):
-        return "total_single_period"
+        return "total"
     return ""
 
 
@@ -1680,7 +1719,8 @@ def build_compare_plan(metric: str, versions: List[str], period: Dict[str, Any])
     plan = {
         "source": metric_spec.source,
         "metric": metric,
-        "family": "compare_versions_same_period",
+        "analysis_type": "compare",
+        "family": "compare",
         "versions": versions,
         "periods": [],
         "analysis": bool(period.get("analysis") if isinstance(period, dict) else False),
@@ -1784,6 +1824,11 @@ def build_match_for_query_id(
     item = get_sql_registry_item_by_id(query_id)
     if item is None:
         if str(query_id or "") in {
+            "total",
+            "trend",
+            "compare",
+            "grouped",
+            "compare_groups",
             "compare_versions_same_period",
             "trend_by_period",
             "total_single_period",
@@ -1800,11 +1845,13 @@ def build_match_for_query_id(
                 {
                     "source": source,
                     "metric": metric,
+                    "analysis_type": _analysis_type_from_family(str(query_id or ""), str(query_id or "") in {"compare_groups", "compare_period_groups"}),
                     "family": str(query_id or ""),
                     "versions": versions,
                     "periods": periods,
                     "period_groups": period_groups,
                     "dimension": str((slots or {}).get("dimension") or ""),
+                    "group_by": str((slots or {}).get("group_by") or (slots or {}).get("dimension") or ""),
                     "filters": dict((slots or {}).get("filters") or {}),
                     "analysis": bool((slots or {}).get("analysis")),
                 },
@@ -1833,7 +1880,17 @@ def build_match_for_query_id(
 
 def build_execution_plan(question: str, intent: str, slots: Dict[str, Any], selected_query_id: str) -> List[SQLExecutionPlanStep]:
     plan: List[SQLExecutionPlanStep] = []
+    analysis_type = str((slots or {}).get("analysis_type") or "").strip().lower()
     primary = selected_query_id or ""
+    if not primary:
+        if analysis_type == "total":
+            primary = "total"
+        elif analysis_type == "trend":
+            primary = "trend"
+        elif analysis_type == "compare":
+            primary = "compare_groups" if len(slots.get("period_groups") or []) >= 2 else "compare"
+        elif analysis_type == "grouped":
+            primary = "grouped"
     if not primary:
         if intent == "sales_total":
             ptype = str(slots.get("period_type") or "")
@@ -1857,15 +1914,13 @@ def build_execution_plan(question: str, intent: str, slots: Dict[str, Any], sele
         plan.append(SQLExecutionPlanStep(query_id=primary, role="primary", reason="intent-primary"))
 
     qnorm = normalize_question(question)
-    if intent == "sales_total":
+    if analysis_type == "total" or intent == "sales_total":
         # 질문이 단순 합계일 때 요약 품질 향상을 위해 월별 breakdown 보조 조회
-        if slots.get("version") and not slots.get("trend") and "추이" not in qnorm:
-            plan.append(SQLExecutionPlanStep(query_id="sales_trend_monthly", role="aux", reason="breakdown-monthly"))
-    elif intent == "sales_trend":
+        if (slots.get("version") or slots.get("versions")) and not slots.get("trend") and "추이" not in qnorm:
+            plan.append(SQLExecutionPlanStep(query_id="trend", role="aux", reason="common-plan-breakdown"))
+    elif analysis_type == "trend" or intent == "sales_trend":
         # 추이 질문은 총합 요약 보조값도 함께 조회
-        ptype = str(slots.get("period_type") or "")
-        aux = "sales_total_month" if ptype == "month" else "sales_total_period_range"
-        plan.append(SQLExecutionPlanStep(query_id=aux, role="aux", reason="trend-total-summary"))
+        plan.append(SQLExecutionPlanStep(query_id="total", role="aux", reason="common-plan-total-summary"))
 
     uniq: List[SQLExecutionPlanStep] = []
     seen = set()
