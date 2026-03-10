@@ -110,7 +110,14 @@ def _build_condition_line(context: Optional[dict]) -> str:
     period_label = str(period.get("label") or period.get("start_yyyymm") or "")
     if not period_label:
         period_label = "기간 미지정"
-    agg_map = {"sum": "합계", "avg": "평균", "max": "최대", "min": "최소", "count": "건수"}
+    agg_map = {
+        "sum": "합계",
+        "avg": "평균",
+        "max": "최대",
+        "min": "최소",
+        "latest": "최신 스냅샷",
+        "weighted_avg": "가중평균",
+    }
     agg_label = agg_map.get(agg, agg)
     return f"- 기준: version={version}, 기간={period_label}, 집계={agg_label}"
 

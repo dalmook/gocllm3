@@ -38,26 +38,49 @@ metrics:
     aliases: ["판매", "판매량", "sales", "매출", "실적"]
     source: psi_simul
     value_column: SALES_MEQ
+    semantic_type: additive
+    default_aggregation: sum
+    allowed_aggregations: ["sum", "avg", "max", "min"]
     unit: "MEQ"
     description: "판매 수량"
   net_prod:
     aliases: ["순생산", "생산", "net production", "net_prod"]
     source: psi_simul
     value_column: FABOUT_NET_MEQ
+    semantic_type: additive
+    default_aggregation: sum
+    allowed_aggregations: ["sum", "avg", "max", "min"]
     unit: "MEQ"
     description: "순생산 수량"
   net_ipgo:
     aliases: ["순입고", "입고", "net ipgo", "net_ipgo"]
     source: psi_simul
     value_column: WHIN_NET_MEQ
+    semantic_type: additive
+    default_aggregation: sum
+    allowed_aggregations: ["sum", "avg", "max", "min"]
     unit: "MEQ"
     description: "순입고 수량"
   CUM_TG:
     aliases: ["수율", "yld", "tg", "cum"]
     source: psi_simul
     value_column: CUM_TG
+    semantic_type: ratio
+    default_aggregation: avg
+    allowed_aggregations: ["avg", "max", "min", "weighted_avg"]
+    numerator_column: CUM_TG
+    denominator_column: WHIN_NET_MEQ
     unit: "%"
     description: "수율 %"    
+  inventory_snapshot:
+    aliases: ["재고", "월말재고", "inventory", "stock"]
+    source: psi_simul
+    value_column: WHIN_NET_MEQ
+    semantic_type: snapshot
+    default_aggregation: latest
+    allowed_aggregations: ["latest", "sum", "avg", "max", "min"]
+    unit: "MEQ"
+    description: "스냅샷형 재고(예시) 지표"
 
 dimensions:
   version:

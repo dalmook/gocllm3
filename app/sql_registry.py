@@ -88,6 +88,11 @@ class SQLMetricSpec:
     value_column: str
     unit: str = "MEQ"
     description: str = ""
+    semantic_type: str = "additive"
+    default_aggregation: str = "sum"
+    allowed_aggregations: List[str] = field(default_factory=lambda: ["sum", "avg", "max", "min", "latest"])
+    numerator_column: str = ""
+    denominator_column: str = ""
 
 
 @dataclass
@@ -219,7 +224,14 @@ _AGG_WORDS = {
     "avg": ["평균"],
     "max": ["최대", "피크"],
     "min": ["최소"],
-    "count": ["건수", "몇건", "몇 건"],
+    "latest": ["최신", "최근값", "마지막", "월말", "latest"],
+}
+
+_SUPPORTED_AGGREGATIONS = {"sum", "avg", "max", "min", "latest", "weighted_avg"}
+_SEMANTIC_DEFAULT_AGGREGATION = {
+    "additive": "sum",
+    "ratio": "avg",
+    "snapshot": "latest",
 }
 
 _TREND_WORDS = ["추이", "트렌드", "흐름"]
@@ -378,6 +390,49 @@ def _analysis_type_from_family(family: str, compare_period_groups: bool = False)
     return _LEGACY_FAMILY_TO_ANALYSIS_TYPE.get(raw, raw)
 
 
+def _normalize_aggregation_name(raw: str) -> str:
+    agg = str(raw or "").strip().lower()
+    return agg if agg in _SUPPORTED_AGGREGATIONS else ""
+
+
+def _normalize_metric_semantic_type(raw: str) -> str:
+    semantic = str(raw or "").strip().lower()
+    return semantic if semantic in _SEMANTIC_DEFAULT_AGGREGATION else "additive"
+
+
+def _resolve_metric_aggregation(metric: SQLMetricSpec, requested: str = "") -> str:
+    allowed = [
+        _normalize_aggregation_name(x)
+        for x in (metric.allowed_aggregations or [])
+        if _normalize_aggregation_name(x)
+    ]
+    semantic_type = _normalize_metric_semantic_type(metric.semantic_type)
+    semantic_default = _SEMANTIC_DEFAULT_AGGREGATION.get(semantic_type, "sum")
+    if not allowed:
+        allowed = [semantic_default]
+
+    default_agg = _normalize_aggregation_name(metric.default_aggregation) or semantic_default
+    if default_agg not in allowed:
+        default_agg = semantic_default if semantic_default in allowed else allowed[0]
+
+    req = _normalize_aggregation_name(requested)
+    if req and req in allowed:
+        return req
+    return default_agg
+
+
+def _build_aggregation_expr(value_column: str, aggregation: str) -> str:
+    agg = _normalize_aggregation_name(aggregation) or "sum"
+    if agg == "latest":
+        # "latest" semantics are handled by the existing latest_snapshot_filter.
+        # Stage-1 behavior keeps numeric roll-up as SUM on that latest snapshot.
+        return f"SUM({value_column})"
+    if agg == "weighted_avg":
+        # TODO(stage-2): implement weighted_avg using metric numerator/denominator columns.
+        return f"AVG({value_column})"
+    return f"{agg.upper()}({value_column})"
+
+
 def _parse_semantic_sections(data: Dict[str, Any]) -> None:
     global _SQL_SOURCES, _SQL_METRICS, _SQL_DIMENSIONS, _SQL_QUERY_FAMILIES
     global _SQL_METRIC_ALIAS_MAP, _SQL_DIMENSION_ALIAS_MAP
@@ -449,6 +504,24 @@ def _parse_semantic_sections(data: Dict[str, Any]) -> None:
             if not metric_id or not source or not value_column:
                 continue
             aliases = [str(x).strip().lower() for x in (spec.get("aliases") or []) if str(x).strip()]
+            semantic_type = _normalize_metric_semantic_type(spec.get("semantic_type") or "additive")
+            allowed_aggs = [
+                _normalize_aggregation_name(str(x))
+                for x in (
+                    spec.get("allowed_aggregations")
+                    or spec.get("supported_aggregations")
+                    or [*_SEMANTIC_DEFAULT_AGGREGATION.values()]
+                )
+                if _normalize_aggregation_name(str(x))
+            ]
+            if not allowed_aggs:
+                allowed_aggs = [_SEMANTIC_DEFAULT_AGGREGATION.get(semantic_type, "sum")]
+            default_agg = _normalize_aggregation_name(spec.get("default_aggregation") or "sum")
+            if not default_agg:
+                default_agg = _SEMANTIC_DEFAULT_AGGREGATION.get(semantic_type, "sum")
+            if default_agg not in allowed_aggs:
+                fallback = _SEMANTIC_DEFAULT_AGGREGATION.get(semantic_type, "sum")
+                default_agg = fallback if fallback in allowed_aggs else allowed_aggs[0]
             metric = SQLMetricSpec(
                 id=metric_id,
                 aliases=aliases,
@@ -456,6 +529,11 @@ def _parse_semantic_sections(data: Dict[str, Any]) -> None:
                 value_column=value_column,
                 unit=str(spec.get("unit") or "MEQ").strip() or "MEQ",
                 description=str(spec.get("description") or "").strip(),
+                semantic_type=semantic_type,
+                default_aggregation=default_agg,
+                allowed_aggregations=allowed_aggs,
+                numerator_column=str(spec.get("numerator_column") or "").strip(),
+                denominator_column=str(spec.get("denominator_column") or "").strip(),
             )
             metrics[metric_id] = metric
             alias_map[metric_id.lower()] = metric_id
@@ -626,8 +704,6 @@ def _extract_aggregation(norm: str) -> str:
     for agg, words in _AGG_WORDS.items():
         if _contains_any(norm, words):
             return agg
-    if "몇" in norm or "얼마" in norm:
-        return "sum"
     return ""
 
 
@@ -1113,6 +1189,7 @@ def canonicalize_plan(question: str, slots: Dict[str, Any], *, now: Optional[dat
     return {
         "source": source,
         "metric": metric,
+        "aggregation": _normalize_aggregation_name(str((slots or {}).get("aggregation") or "")),
         "periods": periods,
         "period_groups": period_groups,
         "filters": filters,
@@ -1194,9 +1271,11 @@ def build_total_sql(
     period_filter: str,
     version_filter: str,
     dimension_filter_sql: str,
+    aggregation: str,
 ) -> str:
+    agg_expr = _build_aggregation_expr(value_column, aggregation)
     return f"""
-SELECT NVL(SUM({value_column}), 0) AS VALUE
+SELECT NVL({agg_expr}, 0) AS VALUE
 FROM {table}
 WHERE 1=1
   AND {latest_snapshot_filter}
@@ -1218,9 +1297,11 @@ def build_trend_sql(
     period_filter: str,
     version_filter: str,
     dimension_filter_sql: str,
+    aggregation: str,
 ) -> str:
+    agg_expr = _build_aggregation_expr(value_column, aggregation)
     return f"""
-SELECT {period_column} AS PERIOD, UPPER({version_column}) AS VERSION, NVL(SUM({value_column}), 0) AS VALUE
+SELECT {period_column} AS PERIOD, UPPER({version_column}) AS VERSION, NVL({agg_expr}, 0) AS VALUE
 FROM {table}
 WHERE 1=1
   AND {latest_snapshot_filter}
@@ -1243,9 +1324,11 @@ def build_compare_versions_sql(
     period_filter: str,
     version_filter: str,
     dimension_filter_sql: str,
+    aggregation: str,
 ) -> str:
+    agg_expr = _build_aggregation_expr(value_column, aggregation)
     return f"""
-SELECT UPPER({version_column}) AS VERSION, NVL(SUM({value_column}), 0) AS VALUE
+SELECT UPPER({version_column}) AS VERSION, NVL({agg_expr}, 0) AS VALUE
 FROM {table}
 WHERE 1=1
   AND {latest_snapshot_filter}
@@ -1268,9 +1351,11 @@ def build_groupby_dimension_sql(
     period_filter: str,
     version_filter: str,
     dimension_filter_sql: str,
+    aggregation: str,
 ) -> str:
+    agg_expr = _build_aggregation_expr(value_column, aggregation)
     return f"""
-SELECT {dimension_column} AS DIMENSION_VALUE, NVL(SUM({value_column}), 0) AS VALUE
+SELECT {dimension_column} AS DIMENSION_VALUE, NVL({agg_expr}, 0) AS VALUE
 FROM {table}
 WHERE 1=1
   AND {latest_snapshot_filter}
@@ -1306,6 +1391,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
     metric = _SQL_METRICS.get(metric_id)
     if metric is None:
         return None
+    aggregation = _resolve_metric_aggregation(metric, str(plan.get("aggregation") or ""))
     source_id = resolve_source(source_id, metric_id, dimension_id) or metric.source
     source = _SQL_SOURCES.get(source_id)
     if source is None or metric.source != source.id:
@@ -1368,6 +1454,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
         "group_by": dimension_id,
         "analysis_type": analysis_type,
         "family": family,
+        "aggregation": aggregation,
         "compare": bool(plan.get("compare")),
         "trend": bool(plan.get("trend")),
         "analysis": bool(plan.get("analysis")),
@@ -1457,6 +1544,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
             period_filter=period_filter,
             version_filter=version_filter,
             dimension_filter_sql=dimension_filter_sql,
+            aggregation=aggregation,
         )
         intent = "metric_compare_versions"
         query_id = "compare"
@@ -1471,6 +1559,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
             period_filter=period_filter,
             version_filter=version_filter,
             dimension_filter_sql=dimension_filter_sql,
+            aggregation=aggregation,
         )
         intent = "metric_trend_by_period"
         query_id = "trend"
@@ -1487,6 +1576,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
             period_filter=period_filter,
             version_filter=version_filter,
             dimension_filter_sql=dimension_filter_sql,
+            aggregation=aggregation,
         )
         intent = "metric_grouped_dimension"
         query_id = "grouped"
@@ -1505,7 +1595,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
             where_parts.append(f"({active_period_column} BETWEEN :{key_s} AND :{key_e})")
         sql = f"""
 SELECT CASE {' '.join(case_parts)} ELSE 'OTHER' END AS PERIOD_GROUP,
-       NVL(SUM({value_column}), 0) AS VALUE
+       NVL({_build_aggregation_expr(value_column, aggregation)}, 0) AS VALUE
 FROM {table}
 WHERE 1=1
   AND {latest_snapshot_filter}
@@ -1528,6 +1618,7 @@ ORDER BY PERIOD_GROUP
             period_filter=period_filter,
             version_filter=version_filter,
             dimension_filter_sql=dimension_filter_sql,
+            aggregation=aggregation,
         )
         intent = intent_hint or "sales_total"
         query_id = "total"
@@ -1544,7 +1635,7 @@ ORDER BY PERIOD_GROUP
         patterns=[],
         intent=intent,
         supported_slots=["metric", "versions", "periods", "period_groups", "dimension", "analysis", "compare", "trend"],
-        default_aggregation="sum",
+        default_aggregation=aggregation,
         supports_compare=family == "compare",
         supports_trend=family == "trend",
         groupable_dimensions=list(_SQL_DIMENSIONS.keys()),
@@ -1613,7 +1704,7 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
     compact = norm.replace(" ", "")
 
     metric = _extract_metric(norm)
-    aggregation = _extract_aggregation(norm) or ("sum" if metric else "")
+    aggregation = _extract_aggregation(norm)
     period_type, period_value = _extract_period_slots(norm, now=now)
     periods = _extract_periods(question, norm, now=now)
     dimension = _extract_dimension(norm)
@@ -1649,7 +1740,7 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
 
     slots: Dict[str, Any] = {
         "metric": metric or "sales",
-        "aggregation": aggregation or "sum",
+        "aggregation": aggregation,
         "period_type": period_type,
         "period_value": period_value,
         "periods": periods,
@@ -2043,6 +2134,7 @@ def build_match_for_query_id(
                     "metric": metric,
                     "analysis_type": _analysis_type_from_family(str(query_id or ""), str(query_id or "") in {"compare_groups", "compare_period_groups"}),
                     "family": str(query_id or ""),
+                    "aggregation": str((slots or {}).get("aggregation") or ""),
                     "versions": versions,
                     "periods": periods,
                     "period_groups": period_groups,
@@ -2153,6 +2245,12 @@ def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Di
     if metric_spec:
         merged_slots["metric_unit"] = metric_spec.unit
         merged_slots["source_name"] = metric_spec.source
+        merged_slots["aggregation"] = _resolve_metric_aggregation(
+            metric_spec,
+            str(merged_slots.get("aggregation") or ""),
+        )
+    else:
+        merged_slots["aggregation"] = _normalize_aggregation_name(str(merged_slots.get("aggregation") or "")) or "sum"
     merged_slots["versions"] = resolve_versions(question, merged_slots)
     merged_slots["filters"] = resolve_filters(question, merged_slots)
     filter_values_upper = {
@@ -2361,10 +2459,8 @@ def _fill_semantic_params(
             result[pname] = _quarter_label_from_yyyymm(period.compare_end_yyyymm)
         elif key in ("period_label",):
             result[pname] = period.label
-        elif key in ("aggregation", "agg") and slots.get("aggregation"):
-            agg = str(slots.get("aggregation") or "sum").lower()
-            if agg not in {"sum", "avg", "max", "min", "count"}:
-                agg = "sum"
+        elif key in ("aggregation", "agg"):
+            agg = _normalize_aggregation_name(str(slots.get("aggregation") or "")) or _normalize_aggregation_name(item.default_aggregation) or "sum"
             result[pname] = agg
         elif key in ("dimension", "group_dimension") and slots.get("dimension"):
             dim = str(slots.get("dimension") or "").lower()

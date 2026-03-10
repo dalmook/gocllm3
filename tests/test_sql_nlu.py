@@ -479,6 +479,53 @@ class SqlNluTest(unittest.TestCase):
         self.assertEqual("202602", params.get("p1"))
         self.assertEqual("202605", params.get("p4"))
 
+    def test_metric_default_aggregation_for_yield_is_avg(self):
+        tr = self._analyze("수율 알려줘")
+        slots = tr.get("final_slots") or {}
+        self.assertEqual("CUM_TG", slots.get("metric"))
+        self.assertEqual("avg", slots.get("aggregation"))
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        self.assertIn("AVG(CUM_TG)", m.item.sql)
+
+    def test_metric_aggregation_can_be_overridden_for_yield(self):
+        tr = self._analyze("수율 최대 알려줘")
+        slots = tr.get("final_slots") or {}
+        self.assertEqual("CUM_TG", slots.get("metric"))
+        self.assertEqual("max", slots.get("aggregation"))
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        self.assertIn("MAX(CUM_TG)", m.item.sql)
+
+    def test_metric_aggregation_falls_back_when_not_allowed(self):
+        tr = self._analyze("수율 합계 알려줘")
+        slots = tr.get("final_slots") or {}
+        self.assertEqual("CUM_TG", slots.get("metric"))
+        self.assertEqual("avg", slots.get("aggregation"))
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        self.assertIn("AVG(CUM_TG)", m.item.sql)
+
+    def test_snapshot_metric_defaults_to_latest_when_aggregation_missing(self):
+        tr = self._analyze("재고 알려줘")
+        slots = tr.get("final_slots") or {}
+        self.assertEqual("inventory_snapshot", slots.get("metric"))
+        self.assertEqual("latest", slots.get("aggregation"))
+
+    def test_rule_renderer_mentions_aggregation_basis_sentence(self):
+        tr = self._analyze("수율 알려줘")
+        answer = render_answer_rule_based(
+            "수율 알려줘",
+            intent=tr.get("final_intent") or "sales_total",
+            slots=tr.get("final_slots") or {},
+            period=tr.get("resolved_period") or {},
+            results=[
+                {"query_id": "total", "role": "primary", "df": FakeDF([{"VALUE": 98.5}])},
+            ],
+            period_infer_reason=tr.get("period_infer_reason") or "",
+        )
+        self.assertIn("수율은(는) 평균 기준입니다.", answer)
+
 
 if __name__ == "__main__":
     unittest.main()

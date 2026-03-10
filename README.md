@@ -102,6 +102,8 @@
 
 - `sources`: 테이블, 기준 컬럼, snapshot 컬럼, 기본 필터
 - `metrics`: 집계 대상 컬럼
+  - metric별 `semantic_type`, `default_aggregation`, `allowed_aggregations` 지정 가능
+  - `weighted_avg` 확장을 위한 `numerator_column`, `denominator_column` 필드 예약
 - `dimensions`: 필터/그룹 차원
 - `query_families`: planner가 사용하는 공통 분석 패턴
 
@@ -111,6 +113,7 @@
 planner 내부 공통 plan은 아래 축으로 정리됩니다.
 
 - `metric`
+- `aggregation`
 - `periods`
 - `filters`
 - `group_by`

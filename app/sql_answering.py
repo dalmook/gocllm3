@@ -50,7 +50,20 @@ def _metric_label(metric: str) -> str:
         "sales": "판매",
         "net_prod": "순생산",
         "net_ipgo": "순입고",
-    }.get(metric, metric)
+        "cum_tg": "수율",
+        "inventory_snapshot": "재고",
+    }.get(str(metric or "").lower(), str(metric or "지표"))
+
+
+def _aggregation_label(agg: str) -> str:
+    return {
+        "sum": "합계",
+        "avg": "평균",
+        "max": "최대",
+        "min": "최소",
+        "latest": "최신 스냅샷",
+        "weighted_avg": "가중평균",
+    }.get(str(agg or "").lower(), str(agg or "합계"))
 
 
 def _version_hint_from_slots(slots: Dict[str, Any]) -> str:
@@ -810,10 +823,12 @@ def render_answer_rule_based(
         data_lines.append("- 조회 결과가 없습니다.")
 
     agg = str(slots.get("aggregation") or "sum")
-    agg_map = {"sum": "합계", "avg": "평균", "max": "최대", "min": "최소", "count": "건수"}
+    agg_label = _aggregation_label(agg)
     dim = str(slots.get("dimension") or "-")
     version = _version_hint_from_slots(slots)
     period_label = _build_exact_period_label(period) or str(period.get("label") or f"{period.get('start_yyyymm','')}~{period.get('end_yyyymm','')}")
+    metric_label = _metric_label(metric)
+    agg_sentence = f"{metric_label}은(는) {agg_label} 기준입니다."
 
     lines = [
         "📌 한줄 요약",
@@ -829,11 +844,12 @@ def render_answer_rule_based(
             resolved_period_line=resolved_period_line,
             source_name=source_name,
             filter_text=filter_text,
-            agg_label=agg_map.get(agg, agg),
+            agg_label=agg_label,
             version=version,
             dimension=dim,
         )
     )
+    lines.append(f"- {agg_sentence}")
     lines.extend(default_lines)
     lines.extend(["", "🔗 이슈지 바로가기 👉 https://go/issueG"])
     return "\n".join(lines)
