@@ -748,8 +748,9 @@ def render_answer_rule_based(
                 total = 0.0
             version = str(slots.get("version") or "전체")
             prefix = f"{filter_text} 기준 " if filter_text else ""
-            summary = f"{prefix}{period_label or '지정 기간'} {version} 누적 판매량은 {_format_number(total)}이며, 현재 질의는 총량 수준을 확인하는 용도에 적합합니다."
-            data_lines.append(f"- 누적 판매량: {_format_number(total)}")
+            metric_label = _metric_label(metric)
+            summary = f"{prefix}{period_label or '지정 기간'} {version} {metric_label} 합계는 {_format_number(total)}이며, 현재 질의는 총량 수준을 확인하는 용도에 적합합니다."
+            data_lines.append(f"- {metric_label} 합계: {_format_number(total)}")
             data_lines.append(f"- 평균 기준값: {_format_number(total)}")
             data_lines.append("- 집계 대상 건수: 1건")
             aux = by_role.get("aux")

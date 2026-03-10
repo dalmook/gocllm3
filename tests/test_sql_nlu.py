@@ -229,6 +229,21 @@ class SqlNluTest(unittest.TestCase):
         self.assertIn("평균 기준값", answer)
         self.assertIn("집계 대상 건수", answer)
 
+    def test_rule_renderer_uses_metric_label_for_non_sales_total(self):
+        tr = self._analyze("올해 dram 순생산 알려줘")
+        answer = render_answer_rule_based(
+            "올해 dram 순생산 알려줘",
+            intent=tr.get("final_intent") or "sales_total",
+            slots=tr.get("final_slots") or {},
+            period=tr.get("resolved_period") or {},
+            results=[
+                {"query_id": "total_single_period", "role": "primary", "df": FakeDF([{"VALUE": 321.0}])},
+            ],
+            period_infer_reason=tr.get("period_infer_reason") or "",
+        )
+        self.assertIn("순생산 합계", answer)
+        self.assertNotIn("판매량", answer)
+
     def test_trend_periods_slots_and_params(self):
         tr = self._analyze("2월 3월 4월 vh 트렌드 분석해줘")
         self.assertEqual("metric_trend_by_period", tr.get("final_intent"))
