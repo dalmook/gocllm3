@@ -38,7 +38,7 @@ from app.sql_registry import (
     get_last_sql_nlu_trace,
 )
 from app.query_intent import classify_query_intent
-from app.hybrid_router import build_hybrid_search_queries, build_route_decision, execute_sql_match
+from app.hybrid_router import build_route_decision, execute_sql_match
 from app.hybrid_answer import (
     summarize_sql_result,
     build_data_only_answer,
@@ -1902,9 +1902,9 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         configure_sql_intent_llm_classifier(
             lambda q, ctx: classify_sql_intent_with_llm(llm, q, ctx)
         )
-        sql_match = find_best_sql_registry_match(effective_question) if not force_glossary_mode else None
-        sql_nlu_trace = get_last_sql_nlu_trace() if sql_match else {}
-        if sql_nlu_trace:
+        sql_match = find_best_sql_registry_match(effective_question) if force_sql_mode else None
+        sql_nlu_trace = get_last_sql_nlu_trace() if force_sql_mode else {}
+        if force_sql_mode and sql_nlu_trace:
             print(f"[SQL_NLU] original={sql_nlu_trace.get('original_question')!r}")
             print(f"[SQL_NLU] normalized={sql_nlu_trace.get('normalized_question')!r}")
             print(f"[SQL_NLU] slots={sql_nlu_trace.get('final_slots') or sql_nlu_trace.get('slots')}")
@@ -1932,7 +1932,6 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 prefer_general=prefer_general,
                 issue_summary_intent=issue_summary_intent,
                 glossary_intent=glossary_intent,
-                sql_trace=sql_nlu_trace,
             )
         print(
             f"[INTENT] force_mode={force_mode or 'none'} "
@@ -1942,7 +1941,6 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
         sql_summary = None
         sql_summary_text = ""
         sql_used = False
-        sql_context: Dict[str, Any] = {}
 
         if force_sql_mode and not sql_match:
             answer = (
@@ -2095,40 +2093,16 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 if sql_exec.get("ok"):
                     sql_used = True
-                    sql_context = {
-                        "intent": str(sql_exec.get("intent") or ""),
-                        "slots": dict(sql_exec.get("slots") or {}),
-                        "period": dict(sql_exec.get("period") or {}),
-                    }
                     sql_summary = summarize_sql_result(
                         sql_exec["df"],
                         result_mode=str(sql_exec.get("result_mode") or "table"),
                         result_field=str(sql_exec.get("result_field") or ""),
                         empty_message=str(sql_exec.get("empty_message") or "조회 결과가 없습니다."),
-                        context=sql_context,
                     )
                     sql_summary_text = "\n".join(sql_summary.get("bullets") or [])
                     print(f"[SQL_RESULT] summary_chars={len(sql_summary_text)}")
                 else:
                     print(f"[SQL_EXEC] failed runner={sql_exec.get('runner')} error={sql_exec.get('error')}")
-                    if final_intent == "data_only":
-                        final_intent = "rag_only"
-                        print("[HYBRID] sql_failed fallback=rag_only")
-
-                if final_intent == "data_only" and sql_summary:
-                    answer = build_data_only_answer(sql_summary, context=sql_context)
-                    print("[HYBRID] sql_used=True rag_used=False")
-                    print("[ANSWER] mode=data_only llm_used=False")
-                    _send_answer_with_feedback_card(answer)
-                    save_conversation_memory(
-                        scope_id=scope_id,
-                        room_id=str(chatroom_id),
-                        user_id=sender_knox,
-                        role="assistant",
-                        content=answer,
-                        chat_type=chat_type,
-                    )
-                    return stats
 
         if final_intent == "general_llm":
             from langchain_core.messages import SystemMessage, HumanMessage
@@ -2188,15 +2162,6 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             "extracted_period_label": (time_range or {}).get("label") if time_range else "",
         }
         perf["rewrite_ms"] = (time.perf_counter() - t_rewrite) * 1000
-        if final_intent == "hybrid" and sql_summary:
-            search_queries = build_hybrid_search_queries(
-                effective_question,
-                search_queries,
-                sql_context=sql_context,
-                sql_summary=sql_summary,
-                max_queries=max(MAX_RAG_QUERIES, 4),
-            )
-            print(f"[HYBRID] expanded_search_queries={search_queries}")
         print(f"[RAG] search queries: {search_queries}")
         strong_mail_intent = has_strong_mail_intent(effective_question)
         prefer_recent_docs = bool(time_range) or should_prioritize_recent_docs(effective_question) or issue_summary_intent
@@ -2373,7 +2338,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             stats["used_rag"] = True
 
             if final_intent == "hybrid" and sql_summary:
-                system_prompt = build_hybrid_prompt(question, sql_summary_text, rag_context, sql_context=sql_context)
+                system_prompt = build_hybrid_prompt(question, sql_summary_text, rag_context)
             elif issue_summary_intent and ISSUE_SUMMARY_SPEED_MODE:
                 system_prompt = f"""
 당신은 GOC 업무 지원 챗봇입니다. 아래 [검색 문서]만 근거로 아주 간결하게 답하세요.
@@ -2469,7 +2434,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 answer += "\n\n🔗 이슈지 바로가기 👉 https://go/issueG"
         else:
             if final_intent == "hybrid" and sql_summary:
-                answer = build_hybrid_fallback_answer(sql_summary, rag_found=False, context=sql_context)
+                answer = build_hybrid_fallback_answer(sql_summary, rag_found=False)
             else:
                 from langchain_core.messages import SystemMessage, HumanMessage
                 fallback_system_prompt = """
