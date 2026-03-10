@@ -699,6 +699,30 @@ def _extract_dimension_filters(norm: str) -> Dict[str, List[str]]:
                 bucket = filters.setdefault(dim_id, [])
                 if normalized not in bucket:
                     bucket.append(normalized)
+
+    # Allow direct value mentions like "dram 올해 판매 트렌드" to map to catalog dimensions
+    # before generic version-token extraction consumes them as version-like codes.
+    for dim_id, dim in _SQL_DIMENSIONS.items():
+        if not dim.supports_filter or dim_id in {"yearmonth", "version"}:
+            continue
+        candidates: Dict[str, str] = {}
+        for sample in dim.sample_values:
+            normalized = normalize_dimension_value(dim_id, sample)
+            if normalized:
+                candidates[str(sample).lower()] = normalized
+        for raw_alias, mapped in (dim.value_aliases or {}).items():
+            normalized = normalize_dimension_value(dim_id, str(mapped))
+            if normalized:
+                candidates[str(raw_alias).lower()] = normalized
+
+        for token, normalized in candidates.items():
+            if not token:
+                continue
+            token_pattern = rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])"
+            if re.search(token_pattern, norm, flags=re.IGNORECASE):
+                bucket = filters.setdefault(dim_id, [])
+                if normalized not in bucket:
+                    bucket.append(normalized)
     return filters
 
 

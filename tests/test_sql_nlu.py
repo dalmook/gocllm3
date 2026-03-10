@@ -299,6 +299,13 @@ class SqlNluTest(unittest.TestCase):
         self.assertEqual([], missing)
         self.assertEqual("MOBILE", params.get("app_1"))
 
+    def test_direct_dimension_value_is_not_treated_as_version(self):
+        tr = self._analyze("dram 올해 판매 트렌드 분석해줘")
+        self.assertEqual("metric_trend_by_period", tr.get("final_intent"))
+        slots = tr.get("final_slots") or {}
+        self.assertEqual(["DRAM"], (slots.get("filters") or {}).get("fam1"))
+        self.assertEqual([], slots.get("versions") or [])
+
     def test_dimension_filter_compare_versions(self):
         tr = self._analyze("FAM1 DRAM VH와 VL 순생산 비교 분석해줘")
         self.assertEqual("metric_compare_versions", tr.get("final_intent"))
