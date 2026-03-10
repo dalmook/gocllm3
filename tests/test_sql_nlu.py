@@ -97,6 +97,50 @@ class SqlNluTest(unittest.TestCase):
         self.assertEqual("202510", p2.get("compare_start_yyyymm"))
         self.assertEqual("202512", p2.get("compare_end_yyyymm"))
 
+    def test_two_digit_year_month_is_normalized_to_2026(self):
+        tr = self._analyze("/sql 26년 12월 vh 수율 알려줘")
+        p = tr.get("resolved_period") or {}
+        debug = tr.get("period_debug") or {}
+        self.assertEqual("202612", p.get("start_yyyymm"))
+        self.assertEqual("202612", p.get("end_yyyymm"))
+        self.assertEqual("26년 12월", debug.get("raw_expression"))
+        self.assertEqual("2026", debug.get("normalized_year"))
+        self.assertFalse(tr.get("period_inferred"))
+
+    def test_two_digit_year_quarter_is_normalized_to_2026(self):
+        tr = self._analyze("/sql 26년 1분기 vh 판매 알려줘")
+        p = tr.get("resolved_period") or {}
+        debug = tr.get("period_debug") or {}
+        self.assertEqual("202601", p.get("start_yyyymm"))
+        self.assertEqual("202603", p.get("end_yyyymm"))
+        self.assertEqual("2026", debug.get("normalized_year"))
+        self.assertEqual("1", debug.get("parsed_quarter"))
+        self.assertFalse(tr.get("period_inferred"))
+
+    def test_four_digit_year_month_remains_explicit(self):
+        tr = self._analyze("/sql 2026년 12월 vh 수율 알려줘")
+        p = tr.get("resolved_period") or {}
+        debug = tr.get("period_debug") or {}
+        self.assertEqual("202612", p.get("start_yyyymm"))
+        self.assertEqual("202612", p.get("end_yyyymm"))
+        self.assertEqual("2026", debug.get("normalized_year"))
+        self.assertFalse(tr.get("period_inferred"))
+
+    def test_two_digit_year_only_remains_explicit(self):
+        tr = self._analyze("/sql 26년 vh 순입고 알려줘")
+        p = tr.get("resolved_period") or {}
+        debug = tr.get("period_debug") or {}
+        self.assertEqual("202601", p.get("start_yyyymm"))
+        self.assertEqual("202612", p.get("end_yyyymm"))
+        self.assertEqual("2026", debug.get("normalized_year"))
+        self.assertFalse(tr.get("period_inferred"))
+
+    def test_month_only_keeps_existing_fallback(self):
+        tr = self._analyze("/sql 12월 vh 수율 알려줘")
+        p = tr.get("resolved_period") or {}
+        self.assertEqual("202512", p.get("start_yyyymm"))
+        self.assertEqual("202512", p.get("end_yyyymm"))
+
     def test_quarter_column_is_used_for_quarter_queries(self):
         tr = self._analyze("이번 분기 WC 몇개")
         m = tr.get("match")

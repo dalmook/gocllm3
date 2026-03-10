@@ -319,6 +319,7 @@ def _latest_complete_yyyymm(now: Optional[datetime] = None) -> str:
 
 def normalize_question(text: str) -> str:
     q = (text or "").strip().lower()
+    q = re.sub(r"(?<!\d)(\d{2})\s*년(?!\d)", r"20\1년", q)
     q = re.sub(r"\bv\s*[/\-]?\s*h\b", " vh ", q, flags=re.IGNORECASE)
     q = re.sub(r"\bv\s*[/\-]?\s*l\b", " vl ", q, flags=re.IGNORECASE)
     q = re.sub(r"\bw\s*[/\-]?\s*c\b", " wc ", q, flags=re.IGNORECASE)
@@ -768,6 +769,76 @@ def _extract_period_slots(norm: str, now: Optional[datetime] = None) -> Tuple[st
     return "", ""
 
 
+def _extract_period_debug_info(question: str, norm: str) -> Dict[str, Any]:
+    raw_expr = ""
+    parsed_year = ""
+    parsed_month = ""
+    parsed_quarter = ""
+    normalized_year = ""
+
+    for pattern in (
+        r"((?:20\d{2}|\d{2})\s*년\s*\d{1,2}\s*월)",
+        r"((?:20\d{2}|\d{2})\s*년\s*[1-4]\s*분기)",
+        r"((?:20\d{2}|\d{2})\s*년)",
+        r"(\d{1,2}\s*월)",
+        r"([1-4]\s*분기)",
+    ):
+        m = re.search(pattern, question, flags=re.IGNORECASE)
+        if m:
+            raw_expr = str(m.group(1) or "").strip()
+            break
+
+    m_year_month = re.search(r"(20\d{2})\s*년\s*(\d{1,2})\s*월", norm)
+    if m_year_month:
+        parsed_year = m_year_month.group(1)
+        parsed_month = str(int(m_year_month.group(2)))
+        normalized_year = parsed_year
+        return {
+            "raw_expression": raw_expr,
+            "parsed_year": parsed_year,
+            "parsed_month": parsed_month,
+            "parsed_quarter": parsed_quarter,
+            "normalized_year": normalized_year,
+            "explicit_year": True,
+        }
+
+    m_year_quarter = re.search(r"(20\d{2})\s*년?\s*([1-4])\s*분기", norm)
+    if m_year_quarter:
+        parsed_year = m_year_quarter.group(1)
+        parsed_quarter = str(int(m_year_quarter.group(2)))
+        normalized_year = parsed_year
+        return {
+            "raw_expression": raw_expr,
+            "parsed_year": parsed_year,
+            "parsed_month": parsed_month,
+            "parsed_quarter": parsed_quarter,
+            "normalized_year": normalized_year,
+            "explicit_year": True,
+        }
+
+    m_year = re.search(r"(20\d{2})\s*년", norm)
+    if m_year:
+        parsed_year = m_year.group(1)
+        normalized_year = parsed_year
+
+    m_month = re.search(r"(?<!\d)(1[0-2]|0?[1-9])\s*월", norm)
+    if m_month:
+        parsed_month = str(int(m_month.group(1)))
+
+    m_quarter = re.search(r"([1-4])\s*분기", norm)
+    if m_quarter:
+        parsed_quarter = str(int(m_quarter.group(1)))
+
+    return {
+        "raw_expression": raw_expr,
+        "parsed_year": parsed_year,
+        "parsed_month": parsed_month,
+        "parsed_quarter": parsed_quarter,
+        "normalized_year": normalized_year,
+        "explicit_year": bool(normalized_year),
+    }
+
+
 def _extract_periods(question: str, norm: str, now: Optional[datetime] = None) -> List[str]:
     current = now or datetime.now()
     periods: List[str] = []
@@ -1024,6 +1095,8 @@ def resolve_periods(question: str, slots: Dict[str, Any], *, now: Optional[datet
     periods = [str(x).strip() for x in ((slots or {}).get("periods") or []) if str(x).strip()]
 
     norm = normalize_question(question)
+    explicit_year = str((slots or {}).get("period_normalized_year") or "").strip()
+    year_for_periods = int(explicit_year) if re.fullmatch(r"20\d{2}", explicit_year) else current.year
     if len(periods) == 2 and ("부터" in norm and "까지" in norm):
         try:
             sm = int(str(periods[0])[4:6])
@@ -1046,7 +1119,7 @@ def resolve_periods(question: str, slots: Dict[str, Any], *, now: Optional[datet
             em = int(m_range.group(2))
             if sm <= em:
                 for mm in range(sm, em + 1):
-                    periods.append(f"{current.year:04d}{mm:02d}")
+                    periods.append(f"{year_for_periods:04d}{mm:02d}")
 
     if not periods:
         m_recent = re.search(r"최근\s*(\d+)\s*개월", norm)
@@ -1068,7 +1141,7 @@ def resolve_periods(question: str, slots: Dict[str, Any], *, now: Optional[datet
         else:
             rng = range(7, 13)
         for mm in rng:
-            periods.append(f"{current.year:04d}{mm:02d}")
+            periods.append(f"{year_for_periods:04d}{mm:02d}")
 
     if not periods:
         m_q = re.search(r"([1-4])\s*분기", norm)
@@ -1076,12 +1149,12 @@ def resolve_periods(question: str, slots: Dict[str, Any], *, now: Optional[datet
             q = int(m_q.group(1))
             start = (q - 1) * 3 + 1
             for mm in range(start, start + 3):
-                periods.append(f"{current.year:04d}{mm:02d}")
+                periods.append(f"{year_for_periods:04d}{mm:02d}")
 
     if not periods:
         month_nums = re.findall(r"(?<!\d)(1[0-2]|0?[1-9])\s*월", norm)
         for m in month_nums:
-            periods.append(f"{current.year:04d}{int(m):02d}")
+            periods.append(f"{year_for_periods:04d}{int(m):02d}")
 
     if not periods:
         pv = str((slots or {}).get("period_value") or "")
@@ -1718,6 +1791,7 @@ def _extract_version(question: str, norm: str) -> str:
 def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -> Dict[str, Any]:
     norm = normalize_question(question)
     compact = norm.replace(" ", "")
+    period_debug = _extract_period_debug_info(question, norm)
 
     metric = _extract_metric(norm)
     aggregation = _extract_aggregation(norm)
@@ -1769,6 +1843,12 @@ def extract_slots_rule_based(question: str, *, now: Optional[datetime] = None) -
         "trend": trend,
         "group_requested": group_requested,
         "filters": filters,
+        "period_raw_expression": str(period_debug.get("raw_expression") or ""),
+        "period_parsed_year": str(period_debug.get("parsed_year") or ""),
+        "period_parsed_month": str(period_debug.get("parsed_month") or ""),
+        "period_parsed_quarter": str(period_debug.get("parsed_quarter") or ""),
+        "period_normalized_year": str(period_debug.get("normalized_year") or ""),
+        "period_has_explicit_year": bool(period_debug.get("explicit_year")),
     }
     return slots
 
@@ -1841,6 +1921,8 @@ def classify_intent_rule_based(question: str, slots: Dict[str, Any]) -> Tuple[st
 def infer_default_period(intent: str, slots: Dict[str, Any], question: str, *, now: Optional[datetime] = None) -> Tuple[Dict[str, Any], bool, str]:
     merged = dict(slots or {})
     if merged.get("period_value") or merged.get("periods") or merged.get("period_groups"):
+        return merged, False, ""
+    if merged.get("period_has_explicit_year"):
         return merged, False, ""
 
     norm = normalize_question(question)
@@ -2294,6 +2376,32 @@ def analyze_sql_question(question: str, *, now: Optional[datetime] = None) -> Di
     trace["period_infer_reason"] = period_infer_reason
 
     period = resolve_period_slots(merged_slots, now=now)
+    period_debug = {
+        "raw_expression": str(merged_slots.get("period_raw_expression") or ""),
+        "parsed_year": str(merged_slots.get("period_parsed_year") or ""),
+        "parsed_month": str(merged_slots.get("period_parsed_month") or ""),
+        "parsed_quarter": str(merged_slots.get("period_parsed_quarter") or ""),
+        "normalized_year": str(merged_slots.get("period_normalized_year") or ""),
+        "explicit_year": bool(merged_slots.get("period_has_explicit_year")),
+        "final_period": {
+            "type": period.period_type,
+            "value": period.period_value,
+            "start_yyyymm": period.start_yyyymm,
+            "end_yyyymm": period.end_yyyymm,
+            "anchor_yyyymm": period.anchor_yyyymm,
+            "label": period.label,
+        },
+    }
+    trace["period_debug"] = period_debug
+    print(
+        "[SQL_PERIOD] "
+        f"raw_expression={period_debug['raw_expression']!r} "
+        f"parsed_year={period_debug['parsed_year']!r} "
+        f"parsed_month={period_debug['parsed_month']!r} "
+        f"parsed_quarter={period_debug['parsed_quarter']!r} "
+        f"normalized_year={period_debug['normalized_year']!r} "
+        f"final_period={period_debug['final_period']}"
+    )
     merged_slots["applied_periods"] = {
         "period_type": period.period_type,
         "period_value": period.period_value,
