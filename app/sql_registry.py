@@ -72,6 +72,7 @@ class SQLSourceSpec:
     period_column: str
     snapshot_column: str
     version_column: str
+    quarter_column: str = ""
     description: str = ""
     latest_snapshot_strategy: str = "max_snapshot_with_filters"
     default_filters: List[str] = field(default_factory=list)
@@ -219,6 +220,21 @@ def _as_result_spec(raw: Dict[str, Any]) -> SQLResultSpec:
     )
 
 
+def _quarter_label_from_yyyymm(yyyymm: str) -> str:
+    value = str(yyyymm or "").strip()
+    m = re.fullmatch(r"(20\d{2})(0[1-9]|1[0-2])", value)
+    if not m:
+        return value
+    year = int(m.group(1))
+    month = int(m.group(2))
+    quarter = ((month - 1) // 3) + 1
+    return f"{year:04d}Q{quarter}"
+
+
+def _quarter_range_labels(start_yyyymm: str, end_yyyymm: str) -> Tuple[str, str]:
+    return _quarter_label_from_yyyymm(start_yyyymm), _quarter_label_from_yyyymm(end_yyyymm)
+
+
 def _parse_semantic_sections(data: Dict[str, Any]) -> None:
     global _SQL_SOURCES, _SQL_METRICS, _SQL_DIMENSIONS, _SQL_QUERY_FAMILIES
     global _SQL_METRIC_ALIAS_MAP, _SQL_DIMENSION_ALIAS_MAP
@@ -259,6 +275,7 @@ def _parse_semantic_sections(data: Dict[str, Any]) -> None:
             period_column = str(spec.get("period_column") or "YEARMONTH").strip()
             snapshot_column = str(spec.get("snapshot_column") or spec.get("workdate_column") or "WORKDATE").strip()
             version_column = str(spec.get("version_column") or "VERSION").strip()
+            quarter_column = str(spec.get("quarter_column") or "").strip()
             if not source_id or not table:
                 continue
             sources[source_id] = SQLSourceSpec(
@@ -268,6 +285,7 @@ def _parse_semantic_sections(data: Dict[str, Any]) -> None:
                 period_column=period_column,
                 snapshot_column=snapshot_column,
                 version_column=version_column,
+                quarter_column=quarter_column,
                 latest_snapshot_strategy=str(spec.get("latest_snapshot_strategy") or "max_snapshot_with_filters").strip(),
                 default_filters=_normalize_source_filters(spec.get("default_filters")),
                 dimensions=[str(x).strip() for x in (spec.get("dimensions") or []) if str(x).strip()],
@@ -1133,6 +1151,9 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
     version_column = _safe_identifier(source.version_column)
     value_column = _safe_identifier(metric.value_column)
     default_filter_sql = _build_default_filter_sql(source.default_filters)
+    period_type = str((period or {}).get("period_type") or (period or {}).get("type") or "").strip().lower()
+    use_quarter_column = bool(source.quarter_column) and period_type == "quarter"
+    active_period_column = _safe_identifier(source.quarter_column) if use_quarter_column else period_column
 
     params: Dict[str, SQLParamSpec] = {}
     slot_meta: Dict[str, Any] = {
@@ -1153,25 +1174,34 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
     }
 
     period_filter = ""
-    if periods:
+    if use_quarter_column:
+        quarter_start, quarter_end = _quarter_range_labels(period.get("start_yyyymm") or "", period.get("end_yyyymm") or "")
+        if quarter_start and quarter_end and quarter_start == quarter_end:
+            params["anchor_quarter"] = SQLParamSpec(type="quarter", required=True, aliases=["anchor_quarter"])
+            period_filter = f" AND {active_period_column} = :anchor_quarter"
+        else:
+            params["start_quarter"] = SQLParamSpec(type="quarter", required=True, aliases=["start_quarter"])
+            params["end_quarter"] = SQLParamSpec(type="quarter", required=True, aliases=["end_quarter"])
+            period_filter = f" AND {active_period_column} BETWEEN :start_quarter AND :end_quarter"
+    elif periods:
         if len(periods) == 1:
             params["anchor_yyyymm"] = SQLParamSpec(type="yyyymm", required=True, aliases=["anchor_yyyymm"])
-            period_filter = f" AND {period_column} = :anchor_yyyymm"
+            period_filter = f" AND {active_period_column} = :anchor_yyyymm"
         elif len(periods) == 2 and all(re.fullmatch(r"20\d{2}(0[1-9]|1[0-2])", p) for p in periods):
             params["start_yyyymm"] = SQLParamSpec(type="yyyymm", required=True, aliases=["start_yyyymm"])
             params["end_yyyymm"] = SQLParamSpec(type="yyyymm", required=True, aliases=["end_yyyymm"])
-            period_filter = f" AND {period_column} BETWEEN :start_yyyymm AND :end_yyyymm"
+            period_filter = f" AND {active_period_column} BETWEEN :start_yyyymm AND :end_yyyymm"
         else:
             p_binds = []
             for idx, _ in enumerate(periods, start=1):
                 key = f"p{idx}"
                 params[key] = SQLParamSpec(type="yyyymm", required=True, aliases=[key])
                 p_binds.append(f":{key}")
-            period_filter = f" AND {period_column} IN ({', '.join(p_binds)})"
+            period_filter = f" AND {active_period_column} IN ({', '.join(p_binds)})"
     else:
         params["start_yyyymm"] = SQLParamSpec(type="yyyymm", required=True, aliases=["start_yyyymm"])
         params["end_yyyymm"] = SQLParamSpec(type="yyyymm", required=True, aliases=["end_yyyymm"])
-        period_filter = f" AND {period_column} BETWEEN :start_yyyymm AND :end_yyyymm"
+        period_filter = f" AND {active_period_column} BETWEEN :start_yyyymm AND :end_yyyymm"
 
     version_filter = ""
     if versions:
@@ -1189,15 +1219,19 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
     )
     slot_meta["filters"] = normalized_filters
 
-    snapshot_period_filter = f"{period_column} BETWEEN :start_yyyymm AND :end_yyyymm"
-    if "anchor_yyyymm" in params:
-        snapshot_period_filter = f"{period_column} = :anchor_yyyymm"
+    snapshot_period_filter = f"{active_period_column} BETWEEN :start_yyyymm AND :end_yyyymm"
+    if "anchor_quarter" in params:
+        snapshot_period_filter = f"{active_period_column} = :anchor_quarter"
+    elif "start_quarter" in params and "end_quarter" in params:
+        snapshot_period_filter = f"{active_period_column} BETWEEN :start_quarter AND :end_quarter"
+    elif "anchor_yyyymm" in params:
+        snapshot_period_filter = f"{active_period_column} = :anchor_yyyymm"
     elif any(k.startswith("p") and k[1:].isdigit() for k in params):
         pkeys = [k for k in params.keys() if re.fullmatch(r"p\d+", k)]
-        snapshot_period_filter = f"{period_column} IN ({', '.join([f':{k}' for k in pkeys])})"
+        snapshot_period_filter = f"{active_period_column} IN ({', '.join([f':{k}' for k in pkeys])})"
     elif len(period_groups) >= 2:
         snapshot_period_filter = " OR ".join(
-            [f"({period_column} BETWEEN :g{i}_start AND :g{i}_end)" for i in range(1, len(period_groups) + 1)]
+            [f"({active_period_column} BETWEEN :g{i}_start AND :g{i}_end)" for i in range(1, len(period_groups) + 1)]
         )
     latest_snapshot_filter = (
         f"{snapshot_column} = (SELECT MAX({snapshot_column}) FROM {table} "
@@ -1222,7 +1256,7 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
     elif family == "trend_by_period":
         sql = build_trend_sql(
             table=table,
-            period_column=period_column,
+            period_column=active_period_column,
             version_column=version_column,
             value_column=value_column,
             latest_snapshot_filter=latest_snapshot_filter,
@@ -1260,8 +1294,8 @@ def build_sql_from_plan(plan: Dict[str, Any], *, period: Dict[str, Any]) -> Opti
             params[key_s] = SQLParamSpec(type="yyyymm", required=True, aliases=[key_s])
             params[key_e] = SQLParamSpec(type="yyyymm", required=True, aliases=[key_e])
             label = str(grp.get("label") or f"G{idx}").replace("'", "''")
-            case_parts.append(f"WHEN {period_column} BETWEEN :{key_s} AND :{key_e} THEN '{label}'")
-            where_parts.append(f"({period_column} BETWEEN :{key_s} AND :{key_e})")
+            case_parts.append(f"WHEN {active_period_column} BETWEEN :{key_s} AND :{key_e} THEN '{label}'")
+            where_parts.append(f"({active_period_column} BETWEEN :{key_s} AND :{key_e})")
         sql = f"""
 SELECT CASE {' '.join(case_parts)} ELSE 'OTHER' END AS PERIOD_GROUP,
        NVL(SUM({value_column}), 0) AS VALUE
@@ -2039,14 +2073,24 @@ def _fill_semantic_params(
                 result[pname] = str(period_groups[idx].get("end_yyyymm") or "")
         elif key in ("yearmonth", "yyyymm", "anchor_yyyymm"):
             result[pname] = period.anchor_yyyymm
+        elif key in ("quarter", "anchor_quarter"):
+            result[pname] = _quarter_label_from_yyyymm(period.anchor_yyyymm)
         elif key in ("start_yyyymm", "from_yyyymm", "start_ym"):
             result[pname] = period.start_yyyymm
         elif key in ("end_yyyymm", "to_yyyymm", "end_ym"):
             result[pname] = period.end_yyyymm
+        elif key in ("start_quarter", "from_quarter"):
+            result[pname] = _quarter_label_from_yyyymm(period.start_yyyymm)
+        elif key in ("end_quarter", "to_quarter"):
+            result[pname] = _quarter_label_from_yyyymm(period.end_yyyymm)
         elif key in ("compare_start_yyyymm", "prev_start_yyyymm"):
             result[pname] = period.compare_start_yyyymm
         elif key in ("compare_end_yyyymm", "prev_end_yyyymm"):
             result[pname] = period.compare_end_yyyymm
+        elif key in ("compare_start_quarter", "prev_start_quarter"):
+            result[pname] = _quarter_label_from_yyyymm(period.compare_start_yyyymm)
+        elif key in ("compare_end_quarter", "prev_end_quarter"):
+            result[pname] = _quarter_label_from_yyyymm(period.compare_end_yyyymm)
         elif key in ("period_label",):
             result[pname] = period.label
         elif key in ("aggregation", "agg") and slots.get("aggregation"):
@@ -2073,6 +2117,9 @@ def _normalize_param_type(spec: SQLParamSpec, value: Any) -> Any:
     if spec.type == "yyyymm":
         m = re.search(r"(20\d{2})(0[1-9]|1[0-2])", v)
         return f"{m.group(1)}{m.group(2)}" if m else v
+    if spec.type == "quarter":
+        m = re.search(r"(20\d{2})\s*[Qq]\s*([1-4])", v)
+        return f"{m.group(1)}Q{m.group(2)}" if m else v.upper()
     return v
 
 

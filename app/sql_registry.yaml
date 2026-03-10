@@ -3,6 +3,7 @@ sources:
     table: mst_psi_simul_report
     description: "PSI 시뮬레이션 리포트"
     period_column: YEARMONTH
+    quarter_column: QUARTER
     snapshot_column: WORKDATE
     version_column: VERSION
     latest_snapshot_strategy: "max_snapshot_with_filters"
@@ -13,6 +14,8 @@ sources:
     columns:
       YEARMONTH:
         description: "기준 년월 YYYYMM"
+      QUARTER:
+        description: "기준 분기 예: 2026Q1"
       WORKDATE:
         description: "적재 기준일"
       VERSION:

@@ -95,6 +95,15 @@ class SqlNluTest(unittest.TestCase):
         self.assertEqual("202510", p2.get("compare_start_yyyymm"))
         self.assertEqual("202512", p2.get("compare_end_yyyymm"))
 
+    def test_quarter_column_is_used_for_quarter_queries(self):
+        tr = self._analyze("이번 분기 WC 몇개")
+        m = tr.get("match")
+        self.assertIsNotNone(m)
+        self.assertIn("QUARTER", m.item.sql)
+        params, missing = build_sql_params_with_missing(m, "이번 분기 WC 몇개")
+        self.assertEqual([], missing)
+        self.assertEqual("2026Q1", params.get("anchor_quarter"))
+
     def test_execution_plan(self):
         tr = self._analyze("VH 판매 몇개야?")
         plan = build_execution_plan(
