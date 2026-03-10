@@ -1,6 +1,17 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
-import pandas as pd
+try:
+    import pandas as pd
+except Exception:  # pragma: no cover - local test shim
+    class _PandasShim:
+        class DataFrame:  # type: ignore[override]
+            pass
+
+        @staticmethod
+        def isna(_value) -> bool:
+            return False
+
+    pd = _PandasShim()  # type: ignore[assignment]
 
 
 def _resolve_field_name(df: pd.DataFrame, field: str) -> str:
@@ -13,6 +24,23 @@ def _resolve_field_name(df: pd.DataFrame, field: str) -> str:
         if str(col).strip().lower() == wanted:
             return str(col)
     return ""
+
+
+def _metric_label(metric: str) -> str:
+    return {
+        "sales": "판매",
+        "net_prod": "순생산",
+        "net_ipgo": "순입고",
+    }.get(str(metric or "").strip(), str(metric or "").strip())
+
+
+def _version_hint(context: Optional[dict]) -> str:
+    slots = (context or {}).get("slots") or {}
+    versions = [str(v).strip().upper() for v in (slots.get("versions") or []) if str(v).strip()]
+    if versions:
+        return ", ".join(versions)
+    version = str(slots.get("version") or "").strip().upper()
+    return version or "전체"
 
 
 
@@ -48,6 +76,7 @@ def summarize_sql_result(
     result_mode: str = "table",
     result_field: str = "",
     empty_message: str = "조회 결과가 없습니다.",
+    context: Optional[Dict[str, Any]] = None,
 ) -> dict:
     if df is None or df.empty:
         return {
@@ -71,6 +100,18 @@ def summarize_sql_result(
                 "summary": empty_message,
                 "bullets": [empty_message],
                 "rows": 0,
+            }
+        if context:
+            period = (context or {}).get("period") or {}
+            period_label = str(period.get("label") or period.get("start_yyyymm") or "지정 기간")
+            metric = _metric_label(str(((context or {}).get("slots") or {}).get("metric") or ""))
+            version = _version_hint(context)
+            unit = str(((context or {}).get("slots") or {}).get("metric_unit") or "").strip()
+            summary_text = f"{period_label} {version} {metric}은 {_to_scalar(value)}{unit}".strip()
+            return {
+                "summary": summary_text,
+                "bullets": [f"- {summary_text}"],
+                "rows": 1,
             }
         return {
             "summary": f"{field}={_to_scalar(value)}",
@@ -106,13 +147,17 @@ def _build_condition_line(context: Optional[dict]) -> str:
     slots = context.get("slots") or {}
     period = context.get("period") or {}
     agg = str(slots.get("aggregation") or "sum")
-    version = str(slots.get("version") or "전체")
+    version = _version_hint(context)
     period_label = str(period.get("label") or period.get("start_yyyymm") or "")
     if not period_label:
         period_label = "기간 미지정"
     agg_map = {"sum": "합계", "avg": "평균", "max": "최대", "min": "최소", "count": "건수"}
     agg_label = agg_map.get(agg, agg)
-    return f"- 기준: version={version}, 기간={period_label}, 집계={agg_label}"
+    compare_basis = str(slots.get("compare_basis") or period.get("compare_basis") or "").strip()
+    line = f"- 기준: version={version}, 기간={period_label}, 집계={agg_label}"
+    if compare_basis:
+        line += f", 비교={compare_basis}"
+    return line
 
 
 def build_data_only_answer(sql_summary: dict, context: Optional[dict] = None) -> str:
@@ -139,7 +184,8 @@ def build_data_only_answer(sql_summary: dict, context: Optional[dict] = None) ->
 
 
 
-def build_hybrid_prompt(question: str, sql_summary_text: str, rag_context: str) -> str:
+def build_hybrid_prompt(question: str, sql_summary_text: str, rag_context: str, *, sql_context: Optional[dict] = None) -> str:
+    condition_line = _build_condition_line(sql_context) or "- SQL 기준 정보 없음"
     return f"""
 당신은 GOC 업무 지원 챗봇입니다.
 질문에 대해 SQL 결과와 문서 근거를 함께 반영해 답하세요.
@@ -149,6 +195,9 @@ def build_hybrid_prompt(question: str, sql_summary_text: str, rag_context: str) 
 
 [SQL 요약]
 {sql_summary_text}
+
+[SQL 기준]
+{condition_line}
 
 [RAG 문서]
 {rag_context}
@@ -162,7 +211,11 @@ def build_hybrid_prompt(question: str, sql_summary_text: str, rag_context: str) 
 
 📂 문서 기반 보강
 - 관련 이슈/배경/변경사항 1~4개
-- 문서 없으면 \"관련 문서를 찾지 못했습니다.\"
+- 문서가 약하면 \"관련 문서는 제한적입니다.\"라고 명시
+
+🧭 적용 기준
+- SQL 기준 기간/필터/비교 기준
+- 문서와 수치가 직접 연결되지 않으면 구분해서 설명
 
 💡 참고
 - SQL과 문서의 기준 시점이 다를 수 있으면 명시
@@ -172,7 +225,7 @@ def build_hybrid_prompt(question: str, sql_summary_text: str, rag_context: str) 
 
 
 
-def build_hybrid_fallback_answer(sql_summary: dict, *, rag_found: bool) -> str:
+def build_hybrid_fallback_answer(sql_summary: dict, *, rag_found: bool, context: Optional[dict] = None) -> str:
     lines = [
         "📌 한줄 요약",
         f"- {sql_summary.get('summary', '조회 결과를 확인했습니다.')}",
@@ -182,9 +235,13 @@ def build_hybrid_fallback_answer(sql_summary: dict, *, rag_found: bool) -> str:
     lines.extend(sql_summary.get("bullets") or ["- 조회 결과가 없습니다."])
     lines.extend(["", "📂 문서 기반 보강"])
     if rag_found:
-        lines.append("- 문서가 있었지만 질문과의 관련성이 낮았습니다.")
+        lines.append("- 관련 문서는 있었지만 질문과 직접 연결되는 근거는 제한적이었습니다.")
     else:
-        lines.append("- 관련 문서를 찾지 못했습니다.")
+        lines.append("- 관련 문서는 제한적이어서 수치 중심으로 먼저 답변했습니다.")
+    cond = _build_condition_line(context)
+    lines.extend(["", "🧭 적용 기준"])
+    if cond:
+        lines.append(cond)
     lines.extend(
         [
             "",

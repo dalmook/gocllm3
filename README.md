@@ -30,6 +30,44 @@
 - 진행 안내 메시지 recall은 `ENABLE_RECALL`로 제어합니다.
 - 피드백 카드는 기본적으로 숨김이며 `ENABLE_FEEDBACK_CARD=true`일 때만 전송합니다.
 
+## 일반 질문 라우팅
+일반 질문도 `/sql` prefix 없이 SQL/RAG/Hybrid 후보를 함께 평가합니다.
+
+- `data_only`
+  - metric/version/period/compare/trend/grouped 신호가 강하고 문서 신호가 약한 경우
+  - 예: `2월 vh 판매 몇개야`
+- `rag_only`
+  - 이슈/메일/회의/문서/배경 중심 질문이고 데이터 신호가 약한 경우
+  - 예: `vh 이번주 이슈 있어?`
+- `hybrid`
+  - 수치 질문과 문서/원인/관련 이슈 신호가 같이 있는 경우
+  - 예: `2월 vh 판매 어때? 관련 이슈도 같이`
+  - 예: `dram 순생산 떨어진 이유 뭐야`
+
+라우팅은 단순 키워드 1개가 아니라 SQL NLU 결과와 문서 신호를 같이 봅니다.
+- SQL 신호: metric, version, period, compare, trend, grouped, filters
+- RAG 신호: 이슈, 원인, 배경, 변경, 보고, 문서, 메일, 회의, 관련, 같이
+
+## Hybrid 처리 순서
+hybrid 질문은 아래 순서로 처리합니다.
+
+1. 질문에서 metadata-safe SQL plan 생성
+2. SQL 실행 후 수치 요약 생성
+3. SQL 결과의 metric/version/period/filter/compare basis로 RAG 검색어 보강
+4. 보강된 질의로 RAG 검색
+5. SQL 결과 + 문서 근거를 함께 최종 답변으로 정리
+
+예:
+- 질문: `2월 vh 판매 어때? 관련 이슈도 같이`
+- SQL 요약: `2026년 2월 VH 판매 ...`
+- 확장 검색어: `VH 판매 2026-02 관련 이슈`, `VH 판매 변경 보고`
+
+## Hybrid / Fallback 정책
+- SQL plan 생성 실패 but 문서 검색 가능: `rag_only`처럼 계속 진행
+- 문서 근거가 약하지만 SQL은 명확: 수치 중심 답변을 우선 제공
+- hybrid 중 한쪽만 실패해도 전체 실패보다 부분 성공을 우선합니다.
+- hybrid 답변은 기본적으로 `한줄 요약 / 데이터 기반 답변 / 문서 기반 보강 / 적용 기준` 구조를 따릅니다.
+
 ## `/sql` 처리 흐름
 `/sql ...` 입력은 metadata-driven planner를 우선 사용하고, 필요 시 legacy query fallback을 사용합니다.
 
@@ -246,7 +284,7 @@ dimensions:
 ## Prefix 정책
 - `/sql ...`: SQL 질의
 - `/용어 ...`: 용어 조회
-- 그 외 일반 텍스트: 기본 LLM/RAG/Hybrid 라우팅
+- 그 외 일반 텍스트: SQL candidate + 문서 신호를 함께 평가해 `data_only / rag_only / hybrid / general_llm` 중 선택
 
 ## 운영 환경변수
 
