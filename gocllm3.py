@@ -56,6 +56,7 @@ from app.search_improvement import (
     summarize_rerank_reason,
     extract_week_tokens_from_doc,
 )
+from app.doc_summary_postprocess import enrich_sparse_issue_lines
 
 from zoneinfo import ZoneInfo
 import holidays
@@ -2637,6 +2638,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 1) 최신 문서일시 순(내림차순)으로 정렬
 2) 문서에 없는 내용은 추측하지 않음
 3) 답변은 짧게: 한줄요약 1개 + 핵심 3개 + 근거 2개
+4) "LV1/LV2" 같은 중요도 라벨만 단독으로 쓰지 말고, 각 항목에 무엇이 문제인지/영향/대응 중 최소 1개를 포함
+5) "관리 이슈 지속중"처럼 포괄 표현만 쓰지 말고, 대상/현상/조치 내용을 구체 명사로 적기
 
 [검색 문서]
 {rag_context}
@@ -2706,6 +2709,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 perf["llm_ms"] = (time.perf_counter() - t_llm) * 1000
                 stats["llm_calls"] += 1
                 answer = response.content.strip()
+                if doc_summary_mode or issue_summary_intent:
+                    answer = enrich_sparse_issue_lines(answer, selected_docs)
 
                 if "📂 근거 문서" not in answer:
                     source_lines = []
