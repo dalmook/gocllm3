@@ -278,6 +278,75 @@ dimensions:
 - 1차에서 timeout이 일부 index에서만 발생해도 fallback은 수행합니다.
 - fallback도 결과가 없지만 1차에서 일부 문서를 이미 받았다면, 완전 실패 대신 1차 partial result를 유지합니다.
 
+## 검색 로직 상세 (중요)
+일반 질의(`_process_llm_chat_background_impl`) 기준 검색 흐름은 아래 순서입니다.
+
+1. 질문 원문 `question` 수신
+2. 기간 추출: `_extract_time_range_from_question(question)`
+   - `YYYY년 M월`, `올해/작년 M월`, `이번주/저번주`, `최근 N일/N주/N개월`
+   - **연도 생략 월 표현(`3월`, `3월달`)도 현재연도로 보정**
+3. 컨텍스트 보강 질의 생성: `_build_effective_question(...)`
+   - 직전 대화 state(topic/time_label)로 후속 질문 보완
+4. 검색 질의 확장: `build_search_queries(effective_question, ...)`
+5. RAG 병렬 조회: `retrieve_rag_documents_parallel(...)`
+6. 인덱스 분리
+   - mail index: `MAIL_INDEX_NAME`
+   - glossary index: `GLOSSARY_INDEX_NAME`
+7. 시간 필터 적용(메일)
+   - `_filter_docs_by_datetime_range(start,end)`
+   - 기간 내 문서가 없으면 직전 14일 확장 1회 재시도
+   - 그래도 없으면 원본 fallback 없이 빈 결과 유지
+8. 재랭킹: `rerank_rag_documents(...)`
+   - 벡터점수 + 최신성 점수 + query_hit_bonus 결합
+   - `prefer_recent`이면 최신시각 우선 정렬
+9. 의도별 최종 도메인 선택
+   - `mail` / `glossary` / `combined`
+10. relevance gate 통과 문서만 최종 컨텍스트로 사용
+
+### 날짜 필터 기준 필드
+- 기본: `_extract_doc_datetime` (`created_time`, `updated_time`, title 내 date 등)
+- 학습문서 탐색(doc_nav learning mode): `_extract_doc_ingested_datetime` (`ingested_at` 우선)
+
+## "3월 VT SBL 회의"가 25년 12월로 튀는 대표 원인
+아래 케이스가 실제로 오탐을 유발합니다.
+
+1) 질의에서 월 파싱 실패
+- 예: `3월달 VT SBL 회의내용 정리해줘`
+- 월 파싱이 안 되면 기간 필터가 적용되지 않아 과거 문서가 점수로 역전될 수 있음
+- 이번 업데이트에서 `3월/3월달` 패턴을 직접 보강함
+
+2) 문서 날짜 메타가 비어있거나 비표준
+- 기간 필터 시 날짜 추출 실패 문서는 제외됨
+- 하지만 기간 필터가 아예 없는 질의에서는 오래된 문서도 벡터 유사도만으로 상위에 남을 수 있음
+
+3) 검색어 확장(rewrite)로 핵심 토큰이 약해지는 경우
+- `VT SBL` 같은 핵심 토큰이 약화되면 semantic 유사 문서(오래된 회의 공지)가 상위로 갈 수 있음
+
+## 검색 개선 방안 (권장 적용 순서)
+1. **기간의도 강제 필터 강화**
+   - 월/주/최근 표현 감지 시, 해당 범위를 벗어난 문서는 최종 후보에서 제거(soft가 아니라 hard)
+
+2. **토큰 앵커 가중치 추가**
+   - 질문 내 영문 대문자 토큰(`VT`, `SBL`)이 title/content에 정확히 매칭되면 가중치↑
+   - 미매칭이면 penalty
+
+3. **최신성 우선 질의의 recency weight 상향**
+   - `최근/최신/이번달/이번주`가 있으면 `RAG_RECENCY_WEIGHT` 동적 상향
+
+4. **월 단위 질의 fallback 정책 분리**
+   - 월 의도는 14일 확장 fallback을 더 보수적으로(예: 같은 월 내만 허용)
+
+5. **디버그 로그 표준화**
+   - 매 질의에 아래를 로그로 남겨 원인 추적 단축
+     - `effective_question`
+     - `extracted_time_range`
+     - `ranged_docs_count`
+     - `top_docs_date/title`
+
+6. **회귀 테스트 케이스 추가**
+   - `3월달 VT SBL 회의내용 정리해줘` => 3월 문서 우선
+   - 동일 키워드가 25년12월/26년3월 모두 있을 때 3월이 상단 유지
+
 ## RAG 사용자 안내 / 메타데이터
 - RAG 병렬 조회 결과는 문서 목록과 별도로 timeout/fallback/user notice 메타데이터를 함께 수집합니다.
 - timeout fallback이 실제로 발생하면 최종 사용자 응답 앞에 아래 안내를 붙일 수 있습니다.

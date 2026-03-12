@@ -1109,6 +1109,16 @@ def _extract_time_range_from_question(question: str) -> Optional[Dict[str, Any]]
             start, end = month_range
             return _mk(f"올해 {target_month}월", start, end)
 
+    # 1-1) 연도 생략 월 표현: "3월", "3 월", "3월달", "3월 달"
+    #      현재 연도 기준으로 보정
+    m = re.search(r"(?<!\d)(\d{1,2})\s*월\s*(?:달)?(?!\d)", q_raw)
+    if m:
+        target_month = int(m.group(1))
+        month_range = _get_month_range(now.year, target_month)
+        if month_range:
+            start, end = month_range
+            return _mk(f"{now.year}년 {target_month}월", start, end)
+
     # 2) 이번주/저번주/이번달/저번달 (캘린더 기간)
     if any(token in q_compact for token in ("이번주", "금주", "이번주간")):
         start, end = _get_week_range(now, week_offset=0)
