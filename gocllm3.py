@@ -2087,6 +2087,16 @@ def start_llm_workers():
 
 
 
+def _strip_time_tokens_for_search(question: str) -> str:
+    q = (question or "")
+    # 연/월/주/최근 표현 제거하여 주제 토큰 중심 검색 질의를 추가 생성
+    q = re.sub(r"\d{4}\s*년", " ", q)
+    q = re.sub(r"(?<!\d)\d{1,2}\s*월(?:\s*달)?", " ", q)
+    q = re.sub(r"(이번주|금주|저번주|지난주|전주|이번달|저번달|지난달|전월|최근\s*\d*\s*(일|주|개월|달)?)", " ", q)
+    q = re.sub(r"\s+", " ", q).strip()
+    return q
+
+
 def generate_deterministic_query_variants(question: str) -> List[str]:
     """LLM 호출 없이 붙여쓰기/표현 차이를 보정하는 검색 질의 변형"""
     base = normalize_query_for_search(question)
@@ -2128,6 +2138,13 @@ def build_search_queries(question: str, llm: ChatOpenAI, *, memory_text: str = "
     queries: List[str] = []
     if RAG_INCLUDE_ORIGINAL_QUERY:
         queries.append(sanitized_original)
+
+    # 기간 토큰 제거 변형(시간 필터와 검색 질의 분리)
+    stripped_time_query = _strip_time_tokens_for_search(question)
+    if stripped_time_query:
+        sq = sanitize_query(normalize_query_for_search(stripped_time_query))
+        if sq and sq != sanitized_original and sq not in queries:
+            queries.append(sq)
 
     # LLM 호출 없이 deterministic 변형을 먼저 추가 (ex. "EDP" -> "EDP 파트")
     deterministic = generate_deterministic_query_variants(question)
