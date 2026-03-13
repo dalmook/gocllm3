@@ -1440,13 +1440,13 @@ def should_prioritize_recent_docs(question: str) -> bool:
 
 
 def get_dynamic_recency_boost(question: str, time_range: Optional[Dict[str, Any]]) -> float:
-    """최신/기간의도 질문에 recency 가중치를 동적으로 올린다."""
-    boost = 1.0
+    """모든 질의에 기본 recent boost를 적용하고, 시간/최신 의도에서는 추가 가중."""
+    boost = 1.3  # 기본값: 기간 미지정 질의도 최신 문서를 우선
     if should_prioritize_recent_docs(question):
-        boost += 0.45
-    if time_range:
         boost += 0.35
-    return min(boost, 1.8)
+    if time_range:
+        boost += 0.25
+    return min(boost, 1.9)
 
 
 def is_glossary_result_relevant(
