@@ -333,6 +333,7 @@ dimensions:
 3. **최신성 우선 질의의 recency weight 상향** (적용)
    - `최근/최신/이번달/이번주`가 있으면 `RAG` relevance 임계치를 완화하고 recency 가중치를 동적 상향
    - 기간의도 질의는 relevance threshold를 완화해 관련 문서가 불필요하게 탈락하지 않도록 처리
+   - 현재 동적 임계치 최저값은 `0.20`으로 설정
 
 4. **월 표현 질의 확장** (적용)
    - `3월`, `3월달` 같은 표현은 deterministic query variant에서 `3.` 패턴 변형도 함께 생성

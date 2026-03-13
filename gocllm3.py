@@ -1373,6 +1373,14 @@ def should_prefer_general_llm(question: str) -> bool:
     q = (question or "").lower()
     return any(h in q for h in GENERAL_QUESTION_HINTS)
 
+def get_dynamic_similarity_threshold(question: str, time_range: Optional[Dict[str, Any]]) -> float:
+    threshold = max(RAG_SIMILARITY_THRESHOLD, RAG_MIN_COMBINED_SCORE)
+    # 기간/최신 의도에서는 더 공격적으로 완화 (최저 0.20)
+    if time_range or should_prioritize_recent_docs(question):
+        threshold = max(0.20, threshold - 0.15)
+    return threshold
+
+
 def is_rag_result_relevant(
     question: str,
     top_docs: List[Dict[str, Any]],
@@ -1395,10 +1403,7 @@ def is_rag_result_relevant(
     # FW:/RE: 같은 전달메일성 제목은 약간 보수적으로
     noisy_title = title.strip().upper().startswith(("FW:", "RE:"))
 
-    effective_threshold = max(RAG_SIMILARITY_THRESHOLD, RAG_MIN_COMBINED_SCORE)
-    # 기간 의도/최신 의도 질의는 임계치를 완화해 관련 최신 문서가 탈락하지 않게 함
-    if time_range or should_prioritize_recent_docs(question):
-        effective_threshold = max(0.28, effective_threshold - 0.07)
+    effective_threshold = get_dynamic_similarity_threshold(question, time_range)
     if top_score < effective_threshold:
         return False
     if keyword_hits < RAG_MIN_KEYWORD_HITS and noisy_title:
@@ -2668,7 +2673,8 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             combined_docs = rerank_rag_documents(all_rag_documents, prefer_recent=prefer_recent_docs)[:RAG_NUM_RESULT_DOC]
             top_docs = combined_docs[:RAG_CONTEXT_DOCS]
             top_score = float(top_docs[0].get("_combined_score") or 0.0) if top_docs else 0.0
-            skip_rag = top_score < RAG_SIMILARITY_THRESHOLD
+            dynamic_threshold = get_dynamic_similarity_threshold(effective_question, time_range)
+            skip_rag = top_score < dynamic_threshold
             rag_relevant = (not skip_rag) and is_rag_result_relevant(effective_question, top_docs, time_range=time_range)
             if rag_relevant:
                 selected_docs = top_docs
@@ -2821,7 +2827,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 if force_glossary:
                     reason = "용어 사전에서 일치 항목을 찾지 못했습니다."
                 elif skip_rag:
-                    reason = f"검색 문서 유사도가 기준치({RAG_SIMILARITY_THRESHOLD})보다 낮았습니다."
+                    reason = f"검색 문서 유사도가 기준치({get_dynamic_similarity_threshold(effective_question, time_range):.2f})보다 낮았습니다."
                 elif (mail_docs or glossary_docs) and not rag_relevant:
                     reason = "검색 문서는 있었지만 질문과의 관련성이 낮았습니다."
                 stats["fallback_reason"] = reason
