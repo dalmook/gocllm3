@@ -978,6 +978,13 @@ def _extract_doc_datetime(doc: Dict[str, Any]) -> Optional[datetime]:
                 dt = _parse_doc_datetime_value(meta.get(key))
                 if dt:
                     return dt
+    src = doc.get("_source")
+    if isinstance(src, dict):
+        for key in DATE_FIELD_CANDIDATES:
+            if key in src:
+                dt = _parse_doc_datetime_value(src.get(key))
+                if dt:
+                    return dt
     for k, v in doc.items():
         lk = str(k).lower()
         if any(token in lk for token in ("date", "time", "updated", "modified", "created", "ts")):
@@ -1000,6 +1007,13 @@ def _extract_doc_ingested_datetime(doc: Dict[str, Any]) -> Optional[datetime]:
         for key in INGESTED_DATE_FIELD_CANDIDATES:
             if key in meta:
                 dt = _parse_doc_datetime_value(meta.get(key))
+                if dt:
+                    return dt
+    src = doc.get("_source")
+    if isinstance(src, dict):
+        for key in INGESTED_DATE_FIELD_CANDIDATES:
+            if key in src:
+                dt = _parse_doc_datetime_value(src.get(key))
                 if dt:
                     return dt
     for k, v in doc.items():
@@ -2532,6 +2546,10 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                         f"{time_range['label']} {time_range['start']}~{time_range['end']}"
                     )
                     all_mail_docs = []
+
+        # 시간 필터 적용 후에는 mail/glossary 분리본 기준으로 전체 문서 후보도 재구성
+        # (기간의도 질의에서 원본 all_rag_documents가 다시 섞이며 과거 문서가 역전되는 현상 방지)
+        all_rag_documents = [*all_mail_docs, *all_glossary_docs]
 
         t_rerank = time.perf_counter()
         mail_datetime_extractor = _extract_doc_ingested_datetime if doc_nav_learning_mode else _extract_doc_datetime
