@@ -1215,6 +1215,7 @@ def rerank_rag_documents(
     prefer_recent: bool = False,
     *,
     datetime_extractor: Optional[Callable[[Dict[str, Any]], Optional[datetime]]] = None,
+    recency_boost: float = 1.0,
 ) -> List[Dict[str, Any]]:
     if not documents:
         return []
@@ -1265,7 +1266,8 @@ def rerank_rag_documents(
             d["_doc_date"] = "날짜 정보 없음"
             d["_doc_ts"] = 0.0
         query_hit_bonus = min(max(int(d.get("_query_hits") or 1) - 1, 0), 3) * 0.03
-        combined_score = ((1 - RAG_RECENCY_WEIGHT) * vec_norm) + (RAG_RECENCY_WEIGHT * recency_score) + query_hit_bonus
+        effective_recency_weight = max(0.0, min(0.9, RAG_RECENCY_WEIGHT * max(recency_boost, 0.1)))
+        combined_score = ((1 - effective_recency_weight) * vec_norm) + (effective_recency_weight * recency_score) + query_hit_bonus
         d["_vector_norm"] = round(vec_norm, 4)
         d["_recency_score"] = round(recency_score, 4)
         d["_combined_score"] = round(combined_score, 4)
@@ -1435,6 +1437,16 @@ def should_prioritize_recent_docs(question: str) -> bool:
         return False
     compact = q_norm.replace(" ", "")
     return any(k in compact for k in RECENT_PRIORITY_KEYWORDS)
+
+
+def get_dynamic_recency_boost(question: str, time_range: Optional[Dict[str, Any]]) -> float:
+    """최신/기간의도 질문에 recency 가중치를 동적으로 올린다."""
+    boost = 1.0
+    if should_prioritize_recent_docs(question):
+        boost += 0.45
+    if time_range:
+        boost += 0.35
+    return min(boost, 1.8)
 
 
 def is_glossary_result_relevant(
@@ -2523,12 +2535,18 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
 
         t_rerank = time.perf_counter()
         mail_datetime_extractor = _extract_doc_ingested_datetime if doc_nav_learning_mode else _extract_doc_datetime
+        dynamic_recency_boost = get_dynamic_recency_boost(effective_question, time_range)
         reranked_mail_docs = rerank_rag_documents(
             all_mail_docs,
             prefer_recent=prefer_recent_docs,
             datetime_extractor=mail_datetime_extractor,
+            recency_boost=dynamic_recency_boost,
         )[:RAG_NUM_RESULT_DOC]
-        reranked_glossary_docs = rerank_rag_documents(all_glossary_docs, prefer_recent=prefer_recent_docs)[:RAG_NUM_RESULT_DOC]
+        reranked_glossary_docs = rerank_rag_documents(
+            all_glossary_docs,
+            prefer_recent=prefer_recent_docs,
+            recency_boost=dynamic_recency_boost,
+        )[:RAG_NUM_RESULT_DOC]
         if weekly_debug.get("weekly_issue_query"):
             reranked_mail_docs = rerank_weekly_issue_docs(
                 effective_question,
