@@ -330,10 +330,14 @@ dimensions:
    - 질문 내 영문 대문자 토큰(`VT`, `SBL`)이 title/content에 정확히 매칭되면 가중치↑
    - 미매칭이면 penalty
 
-3. **최신성 우선 질의의 recency weight 상향**
-   - `최근/최신/이번달/이번주`가 있으면 `RAG_RECENCY_WEIGHT` 동적 상향
+3. **최신성 우선 질의의 recency weight 상향** (적용)
+   - `최근/최신/이번달/이번주`가 있으면 `RAG` relevance 임계치를 완화하고 recency 가중치를 동적 상향
+   - 기간의도 질의는 relevance threshold를 완화해 관련 문서가 불필요하게 탈락하지 않도록 처리
 
-4. **월 단위 질의 fallback 정책 분리**
+4. **월 표현 질의 확장** (적용)
+   - `3월`, `3월달` 같은 표현은 deterministic query variant에서 `3.` 패턴 변형도 함께 생성
+
+5. **월 단위 질의 fallback 정책 분리**
    - 월 의도는 14일 확장 fallback을 더 보수적으로(예: 같은 월 내만 허용)
 
 5. **디버그 로그 표준화**

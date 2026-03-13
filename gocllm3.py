@@ -1373,7 +1373,12 @@ def should_prefer_general_llm(question: str) -> bool:
     q = (question or "").lower()
     return any(h in q for h in GENERAL_QUESTION_HINTS)
 
-def is_rag_result_relevant(question: str, top_docs: List[Dict[str, Any]]) -> bool:
+def is_rag_result_relevant(
+    question: str,
+    top_docs: List[Dict[str, Any]],
+    *,
+    time_range: Optional[Dict[str, Any]] = None,
+) -> bool:
     if not top_docs:
         return False
 
@@ -1391,6 +1396,9 @@ def is_rag_result_relevant(question: str, top_docs: List[Dict[str, Any]]) -> boo
     noisy_title = title.strip().upper().startswith(("FW:", "RE:"))
 
     effective_threshold = max(RAG_SIMILARITY_THRESHOLD, RAG_MIN_COMBINED_SCORE)
+    # 기간 의도/최신 의도 질의는 임계치를 완화해 관련 최신 문서가 탈락하지 않게 함
+    if time_range or should_prioritize_recent_docs(question):
+        effective_threshold = max(0.28, effective_threshold - 0.07)
     if top_score < effective_threshold:
         return False
     if keyword_hits < RAG_MIN_KEYWORD_HITS and noisy_title:
@@ -2092,6 +2100,15 @@ def generate_deterministic_query_variants(question: str) -> List[str]:
             if re.fullmatch(r"[A-Za-z0-9]{2,10}", lead):
                 variants.append(f"{lead} 파트 " + " ".join(parts[1:]))
 
+    # 월 표현 확장: "3월" -> "3.4"/"3/4" 같은 제목 패턴과 결합되도록 월 숫자 토큰 보강
+    month_match = re.search(r"(?<!\d)(\d{1,2})\s*월(?:\s*달)?(?!\d)", question or "")
+    if month_match:
+        m = int(month_match.group(1))
+        if 1 <= m <= 12:
+            variants.append(f"{m}. {q}")
+            variants.append(f"{m}월 {q}")
+            variants.append(f"{m}월달 {q}")
+
     return [v for v in variants if v and v != base]
 def build_search_queries(question: str, llm: ChatOpenAI, *, memory_text: str = "", use_memory_for_rewrite: bool = False) -> List[str]:
     normalized = normalize_query_for_search(question)
@@ -2629,7 +2646,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
                 rag_relevant = True
                 selected_docs = glossary_docs[:RAG_CONTEXT_DOCS]
                 rag_context = format_rag_context(selected_docs, max_docs=RAG_CONTEXT_DOCS)
-        elif mail_docs and is_rag_result_relevant(effective_question, mail_docs):
+        elif mail_docs and is_rag_result_relevant(effective_question, mail_docs, time_range=time_range):
             selected_rag_domain = "mail"
             mail_match = True
             rag_relevant = True
@@ -2652,7 +2669,7 @@ def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
             top_docs = combined_docs[:RAG_CONTEXT_DOCS]
             top_score = float(top_docs[0].get("_combined_score") or 0.0) if top_docs else 0.0
             skip_rag = top_score < RAG_SIMILARITY_THRESHOLD
-            rag_relevant = (not skip_rag) and is_rag_result_relevant(effective_question, top_docs)
+            rag_relevant = (not skip_rag) and is_rag_result_relevant(effective_question, top_docs, time_range=time_range)
             if rag_relevant:
                 selected_docs = top_docs
                 rag_context = format_rag_context(top_docs, max_docs=RAG_CONTEXT_DOCS)
