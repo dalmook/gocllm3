@@ -942,7 +942,9 @@ def _parse_doc_datetime_value(v: Any) -> Optional[datetime]:
     s = str(v).strip()
     if not s:
         return None
-    s_norm = s.replace("Z", "+00:00").replace("/", "-").replace(".", "-")
+    s_norm = s.replace("Z", "+00:00")
+    # 날짜 구분자 정규화: YYYY.MM.DD / YYYY/MM/DD 형태만 안전하게 '-'로 변환
+    s_norm = re.sub(r"^(\d{4})[./](\d{1,2})[./](\d{1,2})(.*)$", r"\1-\2-\3\4", s_norm)
     for fmt in (
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
