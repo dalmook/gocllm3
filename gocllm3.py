@@ -2172,15 +2172,17 @@ def build_search_queries(question: str, llm: ChatOpenAI, *, memory_text: str = "
         return []
 
     queries: List[str] = []
-    if RAG_INCLUDE_ORIGINAL_QUERY:
-        queries.append(sanitized_original)
 
     # 기간 토큰 제거 변형(시간 필터와 검색 질의 분리)
+    # 중요: MAX_RAG_QUERIES가 1인 환경에서도 시간의도 질의가 주제 토큰으로 먼저 검색되도록 우선 배치
     stripped_time_query = _strip_time_tokens_for_search(question)
     if stripped_time_query:
         sq = sanitize_query(normalize_query_for_search(stripped_time_query))
         if sq and sq != sanitized_original and sq not in queries:
             queries.append(sq)
+
+    if RAG_INCLUDE_ORIGINAL_QUERY and sanitized_original not in queries:
+        queries.append(sanitized_original)
 
     # LLM 호출 없이 deterministic 변형을 먼저 추가 (ex. "EDP" -> "EDP 파트")
     deterministic = generate_deterministic_query_variants(question)
@@ -2206,7 +2208,7 @@ def build_search_queries(question: str, llm: ChatOpenAI, *, memory_text: str = "
         queries = [sanitized_original]
 
     debug_queries = queries[:MAX_RAG_QUERIES]
-    print(f"[DEBUG BUILD] stripped_time_query={stripped_time_query!r} queries={debug_queries}")
+    print(f"[DEBUG BUILD] stripped_time_query={stripped_time_query!r} queries_full={queries} queries_used={debug_queries} max={MAX_RAG_QUERIES}")
     return debug_queries
 
 
