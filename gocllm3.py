@@ -985,6 +985,42 @@ def _extract_doc_datetime(doc: Dict[str, Any]) -> Optional[datetime]:
                 dt = _parse_doc_datetime_value(src.get(key))
                 if dt:
                     return dt
+
+    # recursive scan for nested metadata date fields
+    def _walk(obj: Any) -> Optional[datetime]:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                lk = str(k).lower()
+                if any(token in lk for token in ("date", "time", "updated", "modified", "created", "ingest", "index", "ts")):
+                    dt = _parse_doc_datetime_value(v)
+                    if dt:
+                        return dt
+                dt = _walk(v)
+                if dt:
+                    return dt
+        elif isinstance(obj, list):
+            for v in obj:
+                dt = _walk(v)
+                if dt:
+                    return dt
+        return None
+
+    dt_nested = _walk(doc)
+    if dt_nested:
+        return dt_nested
+
+    # title fallback: "..._3.4일(수)" 형태
+    title = str(doc.get("title") or (src.get("title") if isinstance(src, dict) else "") or "")
+    m = re.search(r"(?<!\d)(\d{1,2})[./](\d{1,2})\s*일?", title)
+    if m:
+        now = datetime.now(ZoneInfo("Asia/Seoul"))
+        month = int(m.group(1))
+        day = int(m.group(2))
+        try:
+            return datetime(now.year, month, day, 0, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+        except Exception:
+            pass
+
     for k, v in doc.items():
         lk = str(k).lower()
         if any(token in lk for token in ("date", "time", "updated", "modified", "created", "ts")):
@@ -2130,10 +2166,6 @@ def build_search_queries(question: str, llm: ChatOpenAI, *, memory_text: str = "
     sanitized_original = sanitize_query(normalized)
     if not sanitized_original:
         return []
-
-    # rewrite 비활성화 시 LLM 전처리 호출 없이 normalized 원문 1개만 사용
-    if not ENABLE_QUERY_REWRITE:
-        return [sanitized_original]
 
     queries: List[str] = []
     if RAG_INCLUDE_ORIGINAL_QUERY:
