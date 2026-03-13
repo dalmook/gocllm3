@@ -38,6 +38,8 @@ from app.sql_registry import (
     get_last_sql_nlu_trace,
 )
 from app.query_intent import classify_query_intent
+
+print("### GOCLLM3 BUILD MARKER: 2026-03-13-0127 / commit=4231fd6 ###")
 from app.hybrid_router import build_route_decision, execute_sql_match
 from app.hybrid_answer import (
     summarize_sql_result,
@@ -2202,7 +2204,10 @@ def build_search_queries(question: str, llm: ChatOpenAI, *, memory_text: str = "
 
     if not queries:
         queries = [sanitized_original]
-    return queries[:MAX_RAG_QUERIES]
+
+    debug_queries = queries[:MAX_RAG_QUERIES]
+    print(f"[DEBUG BUILD] stripped_time_query={stripped_time_query!r} queries={debug_queries}")
+    return debug_queries
 
 
 def _process_llm_chat_background_impl(task: Dict[str, Any]) -> Dict[str, Any]:
